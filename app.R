@@ -602,6 +602,7 @@ server <- function(input, output, session) {
   editing_item <- reactiveVal(NULL)
   editing_gang <- reactiveVal(NULL)
   editing_invoice <- reactiveVal(NULL)
+  editing_history_entry <- reactiveVal(NULL)
   inv <- reactive({ invoices_data() %>% mutate(DateParsed = as.Date(Date)) })
   # ---- Google Sheets sync ----
   # One-way, app -> Sheet. Debounced so a burst of edits (e.g.
@@ -1009,12 +1010,18 @@ server <- function(input, output, session) {
             div(class = "d-flex justify-content-between align-items-start flex-wrap",
                 div(strong(h$EntryType), span(class = "text-muted", paste0(" - ", h$DateTime))),
                 if (r %in% c("Admin", "Mechanic") && !is.na(h$EntryID) && h$EntryID != "") div(
-                  if (nrow(linked_row) > 0) tags$a(href = "#", style = "font-size:0.8rem; color:#9C2B2B;",
+                  if (nrow(linked_row) > 0) tags$a(href = "#", style = "font-size:0.8rem; color:#9C2B2B; margin-right:10px;",
                                                    onclick = sprintf("Shiny.setInputValue('unlink_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
                                                    "Unlink")
-                  else tags$a(href = "#", style = "font-size:0.8rem;",
+                  else tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
                               onclick = sprintf("Shiny.setInputValue('link_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
-                              "Link to another entry")
+                              "Link to another entry"),
+                  tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
+                         onclick = sprintf("Shiny.setInputValue('edit_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
+                         "Edit"),
+                  tags$a(href = "#", style = "font-size:0.8rem; color:#9C2B2B;",
+                         onclick = sprintf("Shiny.setInputValue('delete_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
+                         "Delete")
                 )
             ),
             if (nrow(linked_row) > 0) p(class = "mb-1", style = "font-size:0.85rem; color:#8a6d00;",
@@ -1316,6 +1323,64 @@ server <- function(input, output, session) {
     ph$LinkedEntryID[ph$EntryID == eid] <- NA_character_
     plant_history(ph)
     showNotification("Entries unlinked.", type = "message")
+  })
+  # ---- Edit / Delete History entries ----
+  # Deliberately a lightweight edit (date + the full description text)
+  # rather than reopening the original type-specific form (Service
+  # Inspection, Job Card, Truck Service etc all flatten their checklist
+  # answers into Description when saved, so there's no clean way back
+  # into the structured fields) - this covers fixing a typo, a wrong
+  # date, or a mistaken entry, which is what Edit/Delete here is for.
+  # For "Invoice" entries specifically: editing/deleting here only
+  # touches the History record, not the Invoice itself - use the
+  # Invoice's own Edit/Delete on the Invoices tab for that.
+  observeEvent(input$edit_entry_click, {
+    eid <- input$edit_entry_click
+    row <- plant_history()[plant_history()$EntryID == eid, ]
+    req(nrow(row) == 1)
+    editing_history_entry(eid)
+    date_part <- tryCatch(as.Date(strsplit(row$DateTime[1], " ")[[1]][1]), error = function(e) Sys.Date())
+    removeModal()  # ensure any stale modal is torn down before opening a new one
+    showModal(modalDialog(
+      title = paste("Edit Entry -", row$EntryType[1]),
+      dateInput("eh_date", "Date", value = date_part),
+      textAreaInput("eh_desc", "Description", value = row$Description[1], rows = 8),
+      footer = tagList(modalButton("Cancel"), actionButton("eh_submit", "Save Changes", class = "btn-primary"))
+    ))
+  })
+  observeEvent(input$eh_submit, {
+    eid <- editing_history_entry(); req(eid)
+    req(input$eh_desc, trimws(input$eh_desc) != "")
+    ph <- plant_history()
+    row <- ph[ph$EntryID == eid, ]
+    req(nrow(row) == 1)
+    old_time <- strsplit(row$DateTime[1], " ")[[1]]
+    time_part <- if (length(old_time) > 1) old_time[2] else format(Sys.time(), "%H:%M")
+    ph$DateTime[ph$EntryID == eid] <- paste(as.character(input$eh_date), time_part)
+    ph$Description[ph$EntryID == eid] <- input$eh_desc
+    plant_history(ph)
+    editing_history_entry(NULL)
+    removeModal()
+    showNotification("Entry updated.", type = "message")
+  })
+  observeEvent(input$delete_entry_click, {
+    session$userData$pending_delete_entry <- input$delete_entry_click
+    removeModal()  # ensure any stale modal is torn down before opening a new one
+    showModal(modalDialog(
+      title = "Remove this entry?",
+      "This history entry will be permanently removed. This cannot be undone.",
+      footer = tagList(modalButton("Cancel"), actionButton("confirm_delete_entry", "Yes, remove", class = "btn-danger"))
+    ))
+  })
+  observeEvent(input$confirm_delete_entry, {
+    eid <- session$userData$pending_delete_entry
+    ph <- plant_history()
+    # Clear any link pointing at the entry being removed, from either side.
+    ph$LinkedEntryID[!is.na(ph$LinkedEntryID) & ph$LinkedEntryID == eid] <- NA_character_
+    ph <- ph[ph$EntryID != eid, ]
+    plant_history(ph)
+    removeModal()
+    showNotification("Entry removed.", type = "message")
   })
   # ---- Add / Edit item form ----
   item_form_ui <- function(prefill = NULL) {
