@@ -1464,32 +1464,34 @@ server <- function(input, output, session) {
                if (r == "Admin") actionButton("new_gang_sheet_btn", "+ Create New Gang Sheet", class = "btn-primary btn-sm"))
       ),
       if (length(gang_list()) == 0) div(class = "alert alert-secondary", "No gang sheets yet.")
-      else lapply(gang_list(), function(g) {
-        g_rows <- df[df$Gang == g, ]
-        meta_row <- gang_meta()[gang_meta()$Gang == g, ]
-        ganger_nm <- if (nrow(meta_row) > 0) meta_row$Ganger[1] else ""
-        loc_nm <- if (nrow(meta_row) > 0) meta_row$Location[1] else ""
-        detail_bits <- c(
-          if (!is.na(ganger_nm) && ganger_nm != "") paste0("Ganger: ", ganger_nm),
-          if (!is.na(loc_nm) && loc_nm != "") paste0("Location: ", loc_nm)
-        )
-        div(class = "gang-card",
-            div(class = "d-flex justify-content-between align-items-center",
-                h6(paste0(g, " - ", nrow(g_rows), " item(s)")),
-                if (r == "Admin") div(
-                  tags$a(href = "#", style = "font-size:0.85rem; margin-right:12px;",
-                         onclick = sprintf("Shiny.setInputValue('edit_gang_click', '%s', {priority:'event'}); return false;", g),
-                         "Edit"),
-                  tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
-                         onclick = sprintf("Shiny.setInputValue('delete_gang_click', '%s', {priority:'event'}); return false;", g),
-                         "Delete")
-                )
+      else {
+        gang_panels <- lapply(gang_list(), function(g) {
+          g_rows <- df[df$Gang == g, ]
+          meta_row <- gang_meta()[gang_meta()$Gang == g, ]
+          ganger_nm <- if (nrow(meta_row) > 0) meta_row$Ganger[1] else ""
+          loc_nm <- if (nrow(meta_row) > 0) meta_row$Location[1] else ""
+          detail_bits <- c(
+            if (!is.na(ganger_nm) && ganger_nm != "") paste0("Ganger: ", ganger_nm),
+            if (!is.na(loc_nm) && loc_nm != "") paste0("Location: ", loc_nm)
+          )
+          panel_title <- paste0(g, " - ", nrow(g_rows), " item(s)",
+                                 if (length(detail_bits) > 0) paste0(" (", paste(detail_bits, collapse = " | "), ")") else "")
+          accordion_panel(
+            title = panel_title, value = g,
+            if (r == "Admin") div(class = "mb-2",
+                tags$a(href = "#", style = "font-size:0.85rem; margin-right:12px;",
+                       onclick = sprintf("Shiny.setInputValue('edit_gang_click', '%s', {priority:'event'}); return false;", g),
+                       "Edit"),
+                tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
+                       onclick = sprintf("Shiny.setInputValue('delete_gang_click', '%s', {priority:'event'}); return false;", g),
+                       "Delete")
             ),
-            if (length(detail_bits) > 0) p(class = "text-muted mb-2", paste(detail_bits, collapse = " | ")),
             if (nrow(g_rows) == 0) p(class = "text-muted mb-0", "No plant assigned.")
             else tagList(lapply(seq_len(nrow(g_rows)), function(i) item_row(g_rows[i, ], r, clickable = FALSE, show_actions = TRUE)))
-        )
-      }),
+          )
+        })
+        do.call(accordion, c(list(id = "gang_sheets_accordion", open = FALSE), gang_panels))
+      },
       br(),
       h5("Unassigned Plant"),
       p(class = "text-muted", "Available to add to a gang sheet."),
