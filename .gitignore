@@ -1,0 +1,24 @@
+# Google Cloud service account key - never commit, same rules as a password
+sheets_service_account.json
+
+# Local login credentials for testing in RStudio - never commit,
+# real names/passwords live only here and in Posit Connect Cloud's
+# environment variables
+credentials_local.R
+
+# blastula encrypted SMTP credentials file
+email_creds
+
+# Real fleet/inventory data - lives in the Google Sheet once sync is on,
+# this local CSV is just a fallback for running the app before that's set up
+initial_inventory_seed.csv
+
+# Log output from scheduled send_reports.R runs
+logs/
+
+# RStudio / R housekeeping
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
