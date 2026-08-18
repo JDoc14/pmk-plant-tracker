@@ -191,7 +191,7 @@ CATEGORY_COLOUR <- function(cat) {
          "#5B6770"
   )
 }
-ENTRY_TYPES <- c("Driver Assigned", "Damage", "Refurbished", "Mechanic Work", "Note", "Service Inspection", "Job Card", "Truck Service")
+ENTRY_TYPES <- c("Driver Assigned", "Hours Updated", "Damage", "Refurbished", "Mechanic Work", "Note", "Service Inspection", "Job Card", "Truck Service")
 # "Invoice" is deliberately NOT in this list - Invoice history entries
 # are only ever created automatically from the Add Invoice form (see
 # ni_submit), which fills in Company/Amount/etc. Exposing it as a
@@ -312,13 +312,16 @@ INVENTORY_SEED_CSV <- "initial_inventory_seed.csv"
 inventory_cols <- c("ItemID", "Category", "SubCategory", "Machine", "PMK_Number",
                     "Registration", "SerialNumber", "Driver", "Location", "Gang",
                     "DatePurchased", "WarrantyEndDate", "MOTDue", "Active", "OnHire", "Notes",
-                    "TruckServiceRequired")
+                    "TruckServiceRequired", "Hours")
 inventory_seed <- if (file.exists(INVENTORY_SEED_CSV)) {
   df <- read.csv(INVENTORY_SEED_CSV, colClasses = "character", stringsAsFactors = FALSE)
   df[is.na(df)] <- ""
   # TruckServiceRequired is a newer column - default existing rows to "No"
   # if the CSV predates it, so old exports still load fine.
   if (!"TruckServiceRequired" %in% names(df)) df$TruckServiceRequired <- "No"
+  # Hours is a newer column too - default existing rows to blank
+  # (unknown) rather than 0, so it's obvious it's never been logged.
+  if (!"Hours" %in% names(df)) df$Hours <- ""
   df[, inventory_cols]
 } else {
   setNames(data.frame(matrix(character(0), ncol = length(inventory_cols))), inventory_cols)
@@ -983,7 +986,8 @@ server <- function(input, output, session) {
             column(4,
                    p(strong("PMK Number: "), ifelse(row$PMK_Number == "", "-", row$PMK_Number)),
                    p(strong("Registration: "), ifelse(row$Registration == "", "-", row$Registration)),
-                   p(strong("Serial Number: "), ifelse(row$SerialNumber == "", "-", row$SerialNumber))
+                   p(strong("Serial Number: "), ifelse(row$SerialNumber == "", "-", row$SerialNumber)),
+                   p(strong("Hours: "), ifelse(is.null(row$Hours) || is.na(row$Hours) || row$Hours == "", "Not logged", row$Hours))
             ),
             column(4,
                    p(strong("Driver: "), ifelse(row$Driver == "", "Unassigned", row$Driver)),
@@ -1053,6 +1057,8 @@ server <- function(input, output, session) {
       selectInput("ih_type", "Entry Type", choices = ENTRY_TYPES),
       conditionalPanel("input.ih_type == 'Driver Assigned'",
                        textInput("ih_driver", "New Driver")),
+      conditionalPanel("input.ih_type == 'Hours Updated'",
+                       numericInput("ih_hours", "New Hours Reading", value = NA)),
       conditionalPanel("input.ih_type == 'Damage' || input.ih_type == 'Refurbished' || input.ih_type == 'Mechanic Work' || input.ih_type == 'Note'",
                        textAreaInput("ih_desc", "Description", rows = 3)),
       # ---- Service Inspection: mirrors Form 32 ----
@@ -1257,6 +1263,10 @@ server <- function(input, output, session) {
       if (!is.na(matched)) iid <- matched
     }
     desc <- if (input$ih_type == "Driver Assigned") input$ih_driver
+    else if (input$ih_type == "Hours Updated") {
+      req(input$ih_hours, !is.na(input$ih_hours))
+      paste0(format(input$ih_hours, big.mark = ","), " hours")
+    }
     else if (input$ih_type == "Service Inspection") build_service_desc()
     else if (input$ih_type == "Job Card") build_jobcard_desc()
     else if (input$ih_type == "Truck Service") build_truckservice_desc()
@@ -1277,6 +1287,7 @@ server <- function(input, output, session) {
     plant_history(bind_rows(plant_history(), new_entry))
     df <- inventory_data()
     if (input$ih_type == "Driver Assigned") df$Driver[df$ItemID == iid] <- input$ih_driver
+    if (input$ih_type == "Hours Updated") df$Hours[df$ItemID == iid] <- as.character(input$ih_hours)
     if (!is.null(input$ih_location) && trimws(input$ih_location) != "") df$Location[df$ItemID == iid] <- trimws(input$ih_location)
     inventory_data(df)
     removeModal()
@@ -1401,8 +1412,9 @@ server <- function(input, output, session) {
         column(4, textInput("if_serial", "Serial Number", value = g("SerialNumber")))
       ),
       fluidRow(
-        column(6, textInput("if_driver", "Driver", value = g("Driver"), placeholder = "e.g. Spare, or a name")),
-        column(6, textInput("if_location", "Location", value = g("Location"), placeholder = "e.g. Yard, Hawick"))
+        column(4, textInput("if_driver", "Driver", value = g("Driver"), placeholder = "e.g. Spare, or a name")),
+        column(4, textInput("if_location", "Location", value = g("Location"), placeholder = "e.g. Yard, Hawick")),
+        column(4, textInput("if_hours", "Hours", value = g("Hours"), placeholder = "e.g. 1250"))
       ),
       fluidRow(
         column(4, textInput("if_datepurch", "Date Purchased", value = g("DatePurchased"), placeholder = "DD/MM/YY")),
@@ -1461,7 +1473,7 @@ server <- function(input, output, session) {
     row_data <- data.frame(
       Category = cat, SubCategory = sub, Machine = input$if_machine,
       PMK_Number = input$if_pmk, Registration = input$if_reg, SerialNumber = input$if_serial,
-      Driver = input$if_driver, Location = input$if_location,
+      Driver = input$if_driver, Location = input$if_location, Hours = input$if_hours,
       DatePurchased = input$if_datepurch, WarrantyEndDate = input$if_warranty, MOTDue = input$if_mot,
       Active = input$if_active, OnHire = input$if_onhire, Notes = input$if_notes,
       TruckServiceRequired = input$if_truckservice,
