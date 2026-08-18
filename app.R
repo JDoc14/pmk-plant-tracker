@@ -782,6 +782,7 @@ server <- function(input, output, session) {
     if (r %in% c("Admin", "Mechanic", "Agent")) tabs[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
     if (r %in% c("Admin", "Kevin")) tabs[["Invoices"]] <- uiOutput("invoices_tab_content")
     if (r %in% c("Admin", "Kevin")) tabs[["Reports"]] <- uiOutput("reports_tab_content")
+    if (r %in% c("Admin", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
     if (r == "Admin") tabs[["Admin"]] <- uiOutput("admin_tab_content")
     do.call(tabsetPanel, c(
       list(id = "main_tabs", selected = "Home"),
@@ -806,6 +807,7 @@ server <- function(input, output, session) {
     if (r %in% c("Admin", "Mechanic", "Agent")) quick_links <- c(quick_links, "Plant Whereabouts")
     if (r %in% c("Admin", "Kevin")) quick_links <- c(quick_links, "Invoices")
     if (r %in% c("Admin", "Kevin")) quick_links <- c(quick_links, "Reports")
+    if (r %in% c("Admin", "Mechanic")) quick_links <- c(quick_links, "Job Cards & Inspections")
     if (r == "Admin") quick_links <- c(quick_links, "Admin")
     tagList(
       div(class = "hero-logo",
@@ -2044,7 +2046,23 @@ server <- function(input, output, session) {
       tabsetPanel(
         type = "pills",
         tabPanel("Weekly Report", weekly_report_ui()),
-        tabPanel("Monthly Report", monthly_report_ui())
+        tabPanel("Monthly Report", monthly_report_ui()),
+        tabPanel("Invoice Analysis", invoice_analysis_ui())
+      )
+    )
+  }
+  invoice_analysis_ui <- function() {
+    tagList(
+      br(),
+      p(class = "text-muted", "Ranks invoiced items by how often they're invoiced and by total £ spent. Filter by Category/Sub-Category, or leave both on 'All' for the whole fleet."),
+      fluidRow(
+        column(4, selectInput("ia_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
+        column(4, selectizeInput("ia_subcategory", "Sub-Category", choices = "All", selected = "All")),
+        column(4, div(style = "margin-top:24px;", downloadButton("ia_download", "Download (CSV)", class = "btn-primary btn-sm")))
+      ),
+      fluidRow(
+        column(6, div(class = "chart-card", h6("Most Frequently Invoiced"), plotlyOutput("ia_count_plot", height = 340))),
+        column(6, div(class = "chart-card", h6("Most Expensive (Total £)"), plotlyOutput("ia_spend_plot", height = 340)))
       )
     )
   }
@@ -2164,6 +2182,70 @@ server <- function(input, output, session) {
     filename = function() paste0("pmk_weekly_report_", week_start(), ".csv"),
     content = function(file) write.csv(wr_invoices(), file, row.names = FALSE)
   )
+  # ---- Invoice Analysis (Reports > Invoice Analysis) ----
+  # Ranks items by invoice count and by total spend, same Category/
+  # Sub-Category filter pattern used everywhere else. Reuses
+  # find_item_id() (the same matching Invoice->History already relies
+  # on) so slightly-different reference text for the same item still
+  # groups together, rather than splitting "PMK 2" and "PMK-2" apart.
+  observeEvent(input$ia_category, {
+    if (is.null(input$ia_category) || input$ia_category == "All") {
+      updateSelectizeInput(session, "ia_subcategory", choices = "All", selected = "All")
+    } else {
+      subs <- subcats_for(input$ia_category, inventory_data())
+      updateSelectizeInput(session, "ia_subcategory", choices = c("All", subs), selected = "All")
+    }
+  }, ignoreInit = TRUE)
+  invoice_item_agg <- reactive({
+    d <- inv()
+    if (!is.null(input$ia_category) && input$ia_category != "All") d <- d[d$Category == input$ia_category, ]
+    if (!is.null(input$ia_subcategory) && input$ia_subcategory != "All") d <- d[d$SubCategory == input$ia_subcategory, ]
+    empty <- data.frame(MatchedID = character(0), Label = character(0), Category = character(0),
+                         SubCategory = character(0), Count = integer(0), Total = numeric(0), stringsAsFactors = FALSE)
+    if (nrow(d) == 0) return(empty)
+    df_inv <- inventory_data()
+    d$MatchedID <- vapply(seq_len(nrow(d)), function(i) {
+      mid <- find_item_id(d$Category[i], d$SubCategory[i], d$Reference_PMK_Number[i], df_inv)
+      if (is.na(mid)) paste0("Unmatched: ", d$Reference_PMK_Number[i]) else mid
+    }, character(1))
+    label_for <- function(mid) {
+      if (startsWith(mid, "Unmatched: ")) return(mid)
+      row <- df_inv[df_inv$ItemID == mid, ]
+      if (nrow(row) == 0) return(mid)
+      id <- item_identifier(row[1, ])
+      if (row$Machine[1] != "") paste0(id, " - ", row$Machine[1]) else id
+    }
+    agg <- d %>% group_by(MatchedID) %>%
+      summarise(Count = n(), Total = sum(Amount, na.rm = TRUE),
+                Category = dplyr::first(Category), SubCategory = dplyr::first(SubCategory), .groups = "drop")
+    agg$Label <- vapply(agg$MatchedID, label_for, character(1))
+    agg %>% arrange(desc(Total))
+  })
+  output$ia_count_plot <- renderPlotly({
+    a <- invoice_item_agg()
+    if (nrow(a) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    top <- a %>% arrange(desc(Count)) %>% head(10)
+    p <- ggplot(top, aes(x = reorder(Label, Count), y = Count, text = paste0(Count, " invoice(s)"))) +
+      geom_col(fill = "#0B4D3A") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
+    ggplotly(p, tooltip = "text")
+  })
+  output$ia_spend_plot <- renderPlotly({
+    a <- invoice_item_agg()
+    if (nrow(a) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    top <- a %>% arrange(desc(Total)) %>% head(10)
+    p <- ggplot(top, aes(x = reorder(Label, Total), y = Total, text = paste0("£", round(Total, 2)))) +
+      geom_col(fill = "#9C2B2B") + coord_flip() + scale_y_continuous(labels = label_dollar(prefix = "£")) +
+      labs(x = NULL, y = NULL) + gg_theme
+    ggplotly(p, tooltip = "text")
+  })
+  output$ia_download <- downloadHandler(
+    filename = function() paste0("pmk_invoice_analysis_", Sys.Date(), ".csv"),
+    content = function(file) {
+      a <- invoice_item_agg() %>%
+        transmute(Item = Label, Category, SubCategory, `Invoice Count` = Count, `Total Spend (£)` = sprintf("%.2f", Total))
+      write.csv(a, file, row.names = FALSE)
+    }
+  )
   # ---- Monthly report data ----
   month_range <- reactive({
     req(input$mr_month)
@@ -2258,6 +2340,114 @@ server <- function(input, output, session) {
   output$mr_download <- downloadHandler(
     filename = function() paste0("pmk_monthly_report_", input$mr_month, ".csv"),
     content = function(file) write.csv(mr_invoices(), file, row.names = FALSE)
+  )
+  # -------------------------------------------------------------
+  # JOB CARDS & INSPECTIONS - weekly tick-box grid. Green square =
+  # Service Inspection logged that week for that item, yellow = Job
+  # Card, split = both, grey = nothing logged. Admin/Mechanic only -
+  # same access as who can actually add these entry types.
+  # -------------------------------------------------------------
+  output$jobcards_tab_content <- renderUI({ jobcards_ui(role()) })
+  jobcards_ui <- function(r) {
+    tagList(
+      br(),
+      p(class = "text-muted",
+        "Green = Service Inspection logged that week, yellow = Job Card, split square = both. Last 16 weeks. ",
+        "Filter by Category/Sub-Category to keep the list manageable, or download the full log below."),
+      fluidRow(
+        column(4, selectInput("jg_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
+        column(4, selectizeInput("jg_subcategory", "Sub-Category", choices = "All", selected = "All")),
+        column(4, div(style = "margin-top:24px;", downloadButton("jg_download", "Download (CSV)", class = "btn-primary btn-sm")))
+      ),
+      div(class = "chart-card", style = "overflow-x:auto;", uiOutput("jg_grid"))
+    )
+  }
+  observeEvent(input$jg_category, {
+    if (is.null(input$jg_category) || input$jg_category == "All") {
+      updateSelectizeInput(session, "jg_subcategory", choices = "All", selected = "All")
+    } else {
+      subs <- subcats_for(input$jg_category, inventory_data())
+      updateSelectizeInput(session, "jg_subcategory", choices = c("All", subs), selected = "All")
+    }
+  }, ignoreInit = TRUE)
+  jg_filtered_items <- reactive({
+    df <- inventory_data()
+    if (!is.null(input$jg_category) && input$jg_category != "All") df <- df[df$Category == input$jg_category, ]
+    if (!is.null(input$jg_subcategory) && input$jg_subcategory != "All") df <- df[df$SubCategory == input$jg_subcategory, ]
+    natural_sort_rows(df)
+  })
+  jg_weeks <- reactive({
+    this_week <- floor_to_monday(Sys.Date())
+    rev(seq(this_week, by = "-1 week", length.out = 16))
+  })
+  jg_events <- reactive({
+    h <- plant_history()
+    h <- h[h$EntryType %in% c("Service Inspection", "Job Card"), ]
+    if (nrow(h) == 0) return(h)
+    h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
+    h$Week <- floor_to_monday(h$DateOnly)
+    h
+  })
+  output$jg_grid <- renderUI({
+    items <- jg_filtered_items()
+    if (nrow(items) == 0) return(div(class = "alert alert-secondary", "No items match this filter."))
+    weeks <- jg_weeks()
+    ev <- jg_events()
+    n_weeks <- length(weeks)
+    header_cells <- lapply(seq_len(n_weeks), function(i) {
+      lbl <- if (i %% 4 == 1) format(weeks[i], "%d %b") else ""
+      div(style = "width:16px; font-size:9px; color:#8a8a8a; text-align:center; flex-shrink:0;", lbl)
+    })
+    row_divs <- lapply(seq_len(nrow(items)), function(ridx) {
+      row <- items[ridx, ]
+      label <- item_identifier(row)
+      cells <- lapply(seq_len(n_weeks), function(w) {
+        wk <- weeks[w]
+        matches <- if (nrow(ev) == 0) ev else ev[ev$ItemID == row$ItemID & ev$Week == wk, ]
+        has_insp <- nrow(matches) > 0 && any(matches$EntryType == "Service Inspection")
+        has_job  <- nrow(matches) > 0 && any(matches$EntryType == "Job Card")
+        bg <- if (has_insp && has_job) "linear-gradient(135deg,#3E7C59 50%,#D9A400 50%)"
+        else if (has_insp) "#3E7C59"
+        else if (has_job) "#D9A400"
+        else "#E2E2E2"
+        title_txt <- paste0(label, " - week of ", format(wk, "%d %b %Y"),
+                             if (has_insp) " - Service Inspection" else "",
+                             if (has_job) " - Job Card" else "")
+        div(title = title_txt, style = paste0("width:16px; height:16px; border-radius:3px; background:", bg, "; flex-shrink:0;"))
+      })
+      div(style = "display:flex; align-items:center; margin-bottom:3px;",
+          div(style = "width:100px; font-size:11px; font-weight:600; flex-shrink:0;", label),
+          div(style = "display:flex; gap:3px;", cells)
+      )
+    })
+    tagList(
+      div(style = "display:flex; margin-bottom:4px;",
+          div(style = "width:100px; flex-shrink:0;"),
+          div(style = "display:flex; gap:3px;", header_cells)
+      ),
+      row_divs,
+      div(style = "display:flex; gap:16px; margin-top:10px; font-size:11px; color:#666;",
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3E7C59;border-radius:2px;display:inline-block;"), "Service Inspection"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D9A400;border-radius:2px;display:inline-block;"), "Job Card"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#E2E2E2;border-radius:2px;display:inline-block;"), "Nothing logged")
+      )
+    )
+  })
+  jg_download_data <- reactive({
+    items <- jg_filtered_items()
+    if (nrow(items) == 0) return(data.frame(Message = "No items match this filter."))
+    ev <- jg_events()
+    ev2 <- if (nrow(ev) == 0) ev else ev[ev$ItemID %in% items$ItemID, ]
+    if (nrow(ev2) == 0) return(data.frame(Message = "No Job Cards or Service Inspections logged for this filter yet."))
+    id_lookup <- setNames(vapply(seq_len(nrow(items)), function(i) item_identifier(items[i, ]), character(1)), items$ItemID)
+    ev2$Item <- id_lookup[ev2$ItemID]
+    ev2 %>% transmute(Item, `Week Commencing` = as.character(Week), `Entry Type` = EntryType,
+                       `Date/Time` = DateTime, `Recorded By` = RecordedBy) %>%
+      arrange(Item, `Week Commencing`)
+  })
+  output$jg_download <- downloadHandler(
+    filename = function() paste0("pmk_jobcards_inspections_", Sys.Date(), ".csv"),
+    content = function(file) write.csv(jg_download_data(), file, row.names = FALSE)
   )
   # -------------------------------------------------------------
   # ADMIN - control panel, not an edit surface. All data edits stay
