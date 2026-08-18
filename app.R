@@ -2352,7 +2352,7 @@ server <- function(input, output, session) {
     tagList(
       br(),
       p(class = "text-muted",
-        "Green = Service Inspection logged that week, yellow = Job Card, split square = both. Last 16 weeks. ",
+        "Green = Service Inspection logged that week, yellow = Job Card, split square = both. Last 52 weeks. ",
         "Filter by Category/Sub-Category to keep the list manageable, or download the full log below."),
       fluidRow(
         column(4, selectInput("jg_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
@@ -2378,7 +2378,7 @@ server <- function(input, output, session) {
   })
   jg_weeks <- reactive({
     this_week <- floor_to_monday(Sys.Date())
-    rev(seq(this_week, by = "-1 week", length.out = 16))
+    rev(seq(this_week, by = "-1 week", length.out = 52))
   })
   jg_events <- reactive({
     h <- plant_history()
