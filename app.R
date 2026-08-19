@@ -1063,6 +1063,14 @@ server <- function(input, output, session) {
                        numericInput("ih_hours", "New Hours Reading", value = NA)),
       conditionalPanel("input.ih_type == 'Damage' || input.ih_type == 'Refurbished' || input.ih_type == 'Mechanic Work' || input.ih_type == 'Note'",
                        textAreaInput("ih_desc", "Description", rows = 3)),
+      conditionalPanel("input.ih_type == 'Mechanic Work'",
+                       checkboxInput("ih_subcontractor", "Subcontractor work (creates an Invoice too)", value = FALSE),
+                       conditionalPanel("input.ih_subcontractor == true",
+                                        selectizeInput("ih_sub_company", "Subcontractor Company *", choices = COMPANY_LIST,
+                                                       options = list(create = TRUE, placeholder = "Select or type a company name")),
+                                        numericInput("ih_sub_amount", "Amount (£) *", value = NA)
+                       )
+      ),
       # ---- Service Inspection: mirrors Form 32 ----
       conditionalPanel("input.ih_type == 'Service Inspection'",
                        fluidRow(
@@ -1274,14 +1282,50 @@ server <- function(input, output, session) {
     else if (input$ih_type == "Truck Service") build_truckservice_desc()
     else input$ih_desc
     req(desc, desc != "")
+    # Subcontractor Mechanic Work also creates a real Invoice, tagged
+    # onto this same History entry (rather than a second entry) - so
+    # it counts towards spend/Invoice Analysis/reports like any other
+    # invoice, and Editing/Deleting the invoice from the Invoices tab
+    # keeps this History entry in sync the same way it already does
+    # for ordinary auto-logged Invoice entries.
+    is_subcontractor <- input$ih_type == "Mechanic Work" && isTRUE(input$ih_subcontractor)
+    if (is_subcontractor) {
+      if (is.null(input$ih_sub_company) || trimws(input$ih_sub_company) == "") {
+        showNotification("Subcontractor Company is required.", type = "error"); return()
+      }
+      if (is.null(input$ih_sub_amount) || is.na(input$ih_sub_amount)) {
+        showNotification("Amount is required for subcontractor work.", type = "error"); return()
+      }
+    }
     extra <- c()
     if (!is.null(input$ih_location) && trimws(input$ih_location) != "") extra <- c(extra, paste0("Location: ", input$ih_location))
     if (!is.null(input$ih_price) && !is.na(input$ih_price)) extra <- c(extra, paste0("Price: £", sprintf("%.2f", input$ih_price)))
     if (length(extra) > 0) desc <- paste(c(desc, extra), collapse = "\n")
+    invoice_id_for_entry <- NA_character_
+    if (is_subcontractor) {
+      item_row <- inventory_data()[inventory_data()$ItemID == iid, ]
+      invoice_id_for_entry <- next_invoice_id()
+      new_invoice <- data.frame(
+        InvoiceID = invoice_id_for_entry,
+        Company = trimws(input$ih_sub_company),
+        Invoice_Number = "", Account_Number = "", Document_Number = "",
+        Date = as.character(input$ih_date),
+        Amount = input$ih_sub_amount,
+        Description = desc,
+        SPEN_Order_Number = "",
+        Category = if (nrow(item_row) > 0) item_row$Category[1] else "",
+        SubCategory = if (nrow(item_row) > 0) item_row$SubCategory[1] else "",
+        Reference_PMK_Number = if (nrow(item_row) > 0) item_identifier(item_row[1, ]) else iid,
+        LoggedBy = user_name(),
+        stringsAsFactors = FALSE
+      )
+      invoices_data(bind_rows(invoices_data(), new_invoice))
+    }
     new_entry <- data.frame(
       ItemID = iid,
       DateTime = paste(as.character(input$ih_date), format(Sys.time(), "%H:%M")),
       EntryType = input$ih_type, Description = desc, RecordedBy = user_name(),
+      InvoiceID = invoice_id_for_entry,
       EntryID = next_entry_id(),
       LinkedEntryID = if (!is.null(input$ih_link) && input$ih_link != "") input$ih_link else NA_character_,
       stringsAsFactors = FALSE
@@ -1293,7 +1337,8 @@ server <- function(input, output, session) {
     if (!is.null(input$ih_location) && trimws(input$ih_location) != "") df$Location[df$ItemID == iid] <- trimws(input$ih_location)
     inventory_data(df)
     removeModal()
-    showNotification("Entry saved.", type = "message")
+    if (is_subcontractor) showNotification("Entry saved, and logged as an Invoice too.", type = "message")
+    else showNotification("Entry saved.", type = "message")
   })
   # ---- Link / Unlink History entries ----
   # Retroactively links two existing entries on the same item (e.g. a
