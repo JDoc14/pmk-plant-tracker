@@ -1300,6 +1300,8 @@ server <- function(input, output, session) {
     extra <- c()
     if (!is.null(input$ih_location) && trimws(input$ih_location) != "") extra <- c(extra, paste0("Location: ", input$ih_location))
     if (!is.null(input$ih_price) && !is.na(input$ih_price)) extra <- c(extra, paste0("Price: £", sprintf("%.2f", input$ih_price)))
+    if (is_subcontractor) extra <- c(extra, paste0("Company: ", trimws(input$ih_sub_company)),
+                                     paste0("Amount: £", sprintf("%.2f", input$ih_sub_amount)))
     if (length(extra) > 0) desc <- paste(c(desc, extra), collapse = "\n")
     invoice_id_for_entry <- NA_character_
     if (is_subcontractor) {
@@ -2397,7 +2399,7 @@ server <- function(input, output, session) {
     tagList(
       br(),
       p(class = "text-muted",
-        "Green = Service Inspection logged that week, yellow = Job Card, split square = both. Last 52 weeks. ",
+        "Green = Service Inspection, yellow = Job Card, pink = Mechanic Work, logged that week - split square = more than one. Last 52 weeks. ",
         "Filter by Category/Sub-Category to keep the list manageable, or download the full log below."),
       fluidRow(
         column(4, selectInput("jg_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
@@ -2427,12 +2429,27 @@ server <- function(input, output, session) {
   })
   jg_events <- reactive({
     h <- plant_history()
-    h <- h[h$EntryType %in% c("Service Inspection", "Job Card"), ]
+    h <- h[h$EntryType %in% c("Service Inspection", "Job Card", "Mechanic Work"), ]
     if (nrow(h) == 0) return(h)
     h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
     h$Week <- floor_to_monday(h$DateOnly)
     h
   })
+  # Colour per entry type shown on the grid - a single square gets a
+  # diagonal-stripe gradient if more than one type happened the same
+  # week for the same item, rather than only having room for two.
+  JG_TYPE_COLOURS <- c("Service Inspection" = "#3E7C59", "Job Card" = "#D9A400", "Mechanic Work" = "#D6598E")
+  jg_cell_style <- function(types_present) {
+    if (length(types_present) == 0) return("#E2E2E2")
+    if (length(types_present) == 1) return(JG_TYPE_COLOURS[[types_present[1]]])
+    cols <- JG_TYPE_COLOURS[types_present]
+    n <- length(cols)
+    stops <- vapply(seq_len(n), function(i) {
+      pct1 <- round((i - 1) / n * 100); pct2 <- round(i / n * 100)
+      paste0(cols[i], " ", pct1, "%,", cols[i], " ", pct2, "%")
+    }, character(1))
+    paste0("linear-gradient(135deg,", paste(stops, collapse = ","), ")")
+  }
   output$jg_grid <- renderUI({
     items <- jg_filtered_items()
     if (nrow(items) == 0) return(div(class = "alert alert-secondary", "No items match this filter."))
@@ -2449,15 +2466,10 @@ server <- function(input, output, session) {
       cells <- lapply(seq_len(n_weeks), function(w) {
         wk <- weeks[w]
         matches <- if (nrow(ev) == 0) ev else ev[ev$ItemID == row$ItemID & ev$Week == wk, ]
-        has_insp <- nrow(matches) > 0 && any(matches$EntryType == "Service Inspection")
-        has_job  <- nrow(matches) > 0 && any(matches$EntryType == "Job Card")
-        bg <- if (has_insp && has_job) "linear-gradient(135deg,#3E7C59 50%,#D9A400 50%)"
-        else if (has_insp) "#3E7C59"
-        else if (has_job) "#D9A400"
-        else "#E2E2E2"
+        types_present <- if (nrow(matches) == 0) character(0) else intersect(names(JG_TYPE_COLOURS), unique(matches$EntryType))
+        bg <- jg_cell_style(types_present)
         title_txt <- paste0(label, " - week of ", format(wk, "%d %b %Y"),
-                             if (has_insp) " - Service Inspection" else "",
-                             if (has_job) " - Job Card" else "")
+                             if (length(types_present) > 0) paste0(" - ", paste(types_present, collapse = ", ")) else "")
         div(title = title_txt, style = paste0("width:16px; height:16px; border-radius:3px; background:", bg, "; flex-shrink:0;"))
       })
       div(style = "display:flex; align-items:center; margin-bottom:3px;",
@@ -2471,9 +2483,10 @@ server <- function(input, output, session) {
           div(style = "display:flex; gap:3px;", header_cells)
       ),
       row_divs,
-      div(style = "display:flex; gap:16px; margin-top:10px; font-size:11px; color:#666;",
+      div(style = "display:flex; gap:16px; margin-top:10px; font-size:11px; color:#666; flex-wrap:wrap;",
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3E7C59;border-radius:2px;display:inline-block;"), "Service Inspection"),
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D9A400;border-radius:2px;display:inline-block;"), "Job Card"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D6598E;border-radius:2px;display:inline-block;"), "Mechanic Work"),
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#E2E2E2;border-radius:2px;display:inline-block;"), "Nothing logged")
       )
     )
