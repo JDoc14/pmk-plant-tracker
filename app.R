@@ -1751,27 +1751,47 @@ server <- function(input, output, session) {
       }
     )
   }
+  # One row per Gang, one column per plant type - Location and Gang
+  # first, then Small Excavator/Pecker-Breaker/Trailer pulled out to
+  # the front since those are the types crews check for first, then
+  # every other sub-category follows automatically (grouped by
+  # Category, in CATEGORY_OPTIONS order) so a new item type just
+  # slots into its own column with no further changes needed here.
+  # "Pecker/Breaker" rolls up all of 8T/6T/1T Breaker into one column
+  # - gangs care whether they have a breaker, not the tonnage.
+  gang_export_columns <- function() {
+    priority <- list(
+      "Small Excavator" = list(match = function(rows) rows$SubCategory == "Small Excavator"),
+      "Pecker/Breaker"  = list(match = function(rows) rows$Category == "Breaker"),
+      "Trailer"         = list(match = function(rows) rows$SubCategory == "Trailer")
+    )
+    used_subcats <- c("Small Excavator", SUBCATEGORY_MAP[["Breaker"]], "Trailer")
+    other_subcats <- unlist(lapply(CATEGORY_OPTIONS, function(cat) setdiff(SUBCATEGORY_MAP[[cat]], used_subcats)),
+                             use.names = FALSE)
+    other <- setNames(lapply(other_subcats, function(sc) list(match = function(rows) rows$SubCategory == sc)), other_subcats)
+    c(priority, other)
+  }
   gang_sheet_export_data <- reactive({
     df <- inventory_data()
     gm <- gang_meta()
     gl <- gang_list()
     if (length(gl) == 0) return(data.frame(Message = "No gang sheets yet."))
+    cols <- gang_export_columns()
     rows <- lapply(gl, function(g) {
       g_rows <- df[df$Gang == g, ]
       meta_row <- gm[gm$Gang == g, ]
-      ganger_nm <- if (nrow(meta_row) > 0) meta_row$Ganger[1] else ""
       loc_nm <- if (nrow(meta_row) > 0) meta_row$Location[1] else ""
-      if (nrow(g_rows) == 0) {
-        data.frame(Gang = g, Ganger = ganger_nm, Location = loc_nm, Item = "", Category = "", SubCategory = "",
-                   Driver = "", stringsAsFactors = FALSE)
-      } else {
-        data.frame(Gang = g, Ganger = ganger_nm, Location = loc_nm,
-                   Item = vapply(seq_len(nrow(g_rows)), function(i) item_identifier(g_rows[i, ]), character(1)),
-                   Category = g_rows$Category, SubCategory = g_rows$SubCategory, Driver = g_rows$Driver,
-                   stringsAsFactors = FALSE)
+      if (is.na(loc_nm) || trimws(loc_nm) == "") loc_nm <- "No Location Set"
+      row <- data.frame(Location = loc_nm, Gang = g, stringsAsFactors = FALSE)
+      for (col_name in names(cols)) {
+        matched <- if (nrow(g_rows) == 0) g_rows else g_rows[cols[[col_name]]$match(g_rows), , drop = FALSE]
+        row[[col_name]] <- if (nrow(matched) == 0) "" else
+          paste(vapply(seq_len(nrow(matched)), function(i) item_identifier(matched[i, ]), character(1)), collapse = ", ")
       }
+      row
     })
-    do.call(rbind, rows)
+    out <- do.call(rbind, rows)
+    out[order(out$Location, out$Gang), ]
   })
   output$gang_sheets_download <- downloadHandler(
     filename = function() paste0("pmk_gang_sheets_", Sys.Date(), ".csv"),
