@@ -1994,12 +1994,14 @@ server <- function(input, output, session) {
     log_notification(paste0("Updated gang sheet '", name, "' (", length(ticked), " item(s) assigned)"))
   })
   # ---- Bulk "Edit All Gang Assignments" ----
-  # A full reset-and-rebuild of every gang sheet at once: every gang
-  # gets its own blank Ganger/Location + plant picker (same picker as
-  # Create/Edit, just one per gang, namespaced by input ID so they
-  # don't collide), and nothing starts pre-ticked - you're rebuilding
-  # the whole board from a blank slate, not editing on top of what's
-  # already there. Nothing is written to Inventory until Save/Sync.
+  # Rebuild every gang sheet at once: every gang gets its own blank
+  # Ganger/Location + plant picker (same picker as Create/Edit, just
+  # one per gang, namespaced by input ID so they don't collide), and
+  # nothing starts pre-ticked. Only items you actually tick under a
+  # gang get moved there - anything you leave unticked everywhere
+  # keeps its current assignment untouched, so a missed item can't
+  # get silently unassigned. Nothing is written to Inventory until
+  # Save/Sync.
   bulk_gang_form_for <- function(gid, pool_df) {
     lapply(CATEGORY_OPTIONS, function(cat) {
       cat_rows <- pool_df[pool_df$Category == cat, ]
@@ -2039,7 +2041,7 @@ server <- function(input, output, session) {
     showModal(modalDialog(
       title = "Edit All Gang Assignments", size = "l", easyClose = FALSE,
       div(class = "alert alert-warning",
-          "Every gang below starts blank - nothing is ticked and no Ganger/Location is pre-filled, even though the real assignments still exist until you save. Tick each gang's plant and re-enter its Ganger/Location, then hit Save/Sync at the bottom. Anything you leave unticked for every gang becomes unassigned."),
+          "Every gang below starts blank - nothing is ticked and no Ganger/Location is pre-filled, even though the real assignments still exist until you save. Tick each gang's plant and re-enter its Ganger/Location, then hit Save/Sync at the bottom. Anything you leave unticked under every gang keeps its current assignment - nothing changes for it."),
       tagList(lapply(gl, function(g) {
         gid <- make.names(g)
         tagList(
@@ -2089,9 +2091,9 @@ server <- function(input, output, session) {
       if (location != "") df$Location[df$ItemID %in% ticked] <- location
       save_gang_meta(g, ganger, location)
     }
-    # Anything not ticked for any gang goes back to Unassigned - this
-    # is a full rebuild, not an incremental edit.
-    df$Gang[!(df$ItemID %in% all_ticked)] <- ""
+    # Anything not ticked under any gang is left exactly as it was
+    # (df already holds its current Gang) - a missed item keeps its
+    # existing assignment instead of silently losing it.
     # Log a history entry only for items whose gang actually changed -
     # nothing for plant that stayed put.
     changed_ids <- df$ItemID[vapply(df$ItemID, function(id) !identical(old_gang[[id]], df$Gang[df$ItemID == id][1]), logical(1))]
