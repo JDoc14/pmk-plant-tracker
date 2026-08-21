@@ -140,10 +140,12 @@ load_initial_data <- function(seed_df, tab_name, sheet_cols) {
 #   3. Do this for: PMK_LOGIN_SEAN, PMK_LOGIN_JACK,
 #      PMK_LOGIN_MECHANIC1, PMK_LOGIN_KEVIN, PMK_LOGIN_AGENT1,
 #      PMK_LOGIN_GUEST, PMK_LOGIN_EVAN. Roles are Admin / Admin /
-#      Mechanic / Kevin / Agent / Guest / Ganger respectively. The
-#      "Ganger" role can access and edit Inventory List and Plant
-#      Whereabouts, plus just the Ganger List card on Admin - nothing
-#      else (no Invoices/Reports/Job Cards/Plant Analysis).
+#      Mechanic / Boss / Agent / Guest / Plantman respectively. The
+#      "Boss" role has the exact same access as Admin everywhere in
+#      the app. The "Plantman" role can access and edit Inventory
+#      List and Plant Whereabouts, plus just the Ganger List card on
+#      Admin - nothing else (no Invoices/Reports/Job Cards/Plant
+#      Analysis).
 # For local testing (RStudio on your own computer), create a file
 # called credentials_local.R next to app.R (it's in .gitignore, so it
 # never gets committed) defining a `credentials` data.frame with the
@@ -432,7 +434,7 @@ item_row <- function(row, r, clickable = TRUE, show_actions = TRUE) {
             p(class = "mb-1", paste("Driver:", ifelse(row$Driver == "", "Unassigned", row$Driver))),
             if (row$Location != "") p(class = "mb-1 text-muted", style = "font-size:0.8rem;", paste("Location:", row$Location)),
             span(class = paste0("badge ", ifelse(row$Active == "Yes", "bg-success", "bg-secondary")), row$Active),
-            if (r %in% c("Admin", "Ganger") && show_actions) div(style = "margin-top:6px;",
+            if (r %in% c("Admin", "Boss", "Plantman") && show_actions) div(style = "margin-top:6px;",
                                                   tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
                                                          onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('edit_item_click', '%s', {priority:'event'}); return false;", row$ItemID),
                                                          "Edit"),
@@ -818,13 +820,13 @@ server <- function(input, output, session) {
     tabs <- list()
     tabs[["Home"]] <- uiOutput("home_tab_content")
     tabs[["Inventory List"]] <- uiOutput("inventory_tab_content")
-    if (r %in% c("Admin", "Mechanic", "Agent", "Ganger")) tabs[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
-    if (r %in% c("Admin", "Kevin")) tabs[["Invoices"]] <- uiOutput("invoices_tab_content")
-    if (r %in% c("Admin", "Kevin")) tabs[["Reports"]] <- uiOutput("reports_tab_content")
-    if (r %in% c("Admin", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
-    if (r %in% c("Admin", "Mechanic")) tabs[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
-    if (r %in% c("Admin", "Ganger")) tabs[["Admin"]] <- uiOutput("admin_tab_content")
-    if (r == "Admin") tabs[["Notifications"]] <- uiOutput("notifications_tab_content")
+    if (r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) tabs[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
+    if (r %in% c("Admin", "Boss", "Kevin")) tabs[["Invoices"]] <- uiOutput("invoices_tab_content")
+    if (r %in% c("Admin", "Boss", "Kevin")) tabs[["Reports"]] <- uiOutput("reports_tab_content")
+    if (r %in% c("Admin", "Boss", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
+    if (r %in% c("Admin", "Boss", "Mechanic")) tabs[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
+    if (r %in% c("Admin", "Boss", "Plantman")) tabs[["Admin"]] <- uiOutput("admin_tab_content")
+    if (r %in% c("Admin", "Boss")) tabs[["Notifications"]] <- uiOutput("notifications_tab_content")
     do.call(tabsetPanel, c(
       list(id = "main_tabs", selected = "Home"),
       lapply(names(tabs), function(nm) tabPanel(nm, tabs[[nm]])),
@@ -839,18 +841,18 @@ server <- function(input, output, session) {
     df <- inventory_data()
     n_plant <- nrow(df)
     n_history <- nrow(plant_history())
-    n_invoices_home <- if (r %in% c("Admin", "Kevin")) nrow(invoices_data()) else NA
+    n_invoices_home <- if (r %in% c("Admin", "Boss", "Kevin")) nrow(invoices_data()) else NA
     due_soon <- due_within(30)
     n_due_soon <- nrow(due_soon)
     ts_due <- truck_service_due(14)
     n_ts_due <- nrow(ts_due)
     quick_links <- c("Inventory List")
-    if (r %in% c("Admin", "Mechanic", "Agent", "Ganger")) quick_links <- c(quick_links, "Plant Whereabouts")
-    if (r %in% c("Admin", "Kevin")) quick_links <- c(quick_links, "Invoices")
-    if (r %in% c("Admin", "Kevin")) quick_links <- c(quick_links, "Reports")
-    if (r %in% c("Admin", "Mechanic")) quick_links <- c(quick_links, "Job Cards & Inspections")
-    if (r %in% c("Admin", "Mechanic")) quick_links <- c(quick_links, "Plant Analysis")
-    if (r %in% c("Admin", "Ganger")) quick_links <- c(quick_links, "Admin")
+    if (r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) quick_links <- c(quick_links, "Plant Whereabouts")
+    if (r %in% c("Admin", "Boss", "Kevin")) quick_links <- c(quick_links, "Invoices")
+    if (r %in% c("Admin", "Boss", "Kevin")) quick_links <- c(quick_links, "Reports")
+    if (r %in% c("Admin", "Boss", "Mechanic")) quick_links <- c(quick_links, "Job Cards & Inspections")
+    if (r %in% c("Admin", "Boss", "Mechanic")) quick_links <- c(quick_links, "Plant Analysis")
+    if (r %in% c("Admin", "Boss", "Plantman")) quick_links <- c(quick_links, "Admin")
     tagList(
       div(class = "hero-logo",
           tags$img(src = "pmk_logo.webp"),
@@ -878,7 +880,7 @@ server <- function(input, output, session) {
         h6("Truck Service Due Within 14 Days", style = "text-align:center;"),
         div(class = "chart-card", tableOutput("home_truckservice_table"))
       ),
-      if (r %in% c("Admin", "Kevin")) tagList(
+      if (r %in% c("Admin", "Boss", "Kevin")) tagList(
         br(),
         h6("Invoice Highlights", style = "text-align:center;"),
         div(class = "chart-card", tableOutput("home_invoice_highlights"))
@@ -891,7 +893,7 @@ server <- function(input, output, session) {
       ),
       fluidRow(
         column(6, div(class = "chart-card", h6("History Entries Logged"), plotlyOutput("home_history_trend_plot", height = 260))),
-        if (r %in% c("Admin", "Kevin")) column(6, div(class = "chart-card", h6("Invoice Spend"), plotlyOutput("home_invoice_trend_plot", height = 260)))
+        if (r %in% c("Admin", "Boss", "Kevin")) column(6, div(class = "chart-card", h6("Invoice Spend"), plotlyOutput("home_invoice_trend_plot", height = 260)))
       ),
       br(),
       h6("Quick links", style = "text-align:center;"),
@@ -1032,12 +1034,12 @@ server <- function(input, output, session) {
       br(),
       fluidRow(
         column(8, p(class = "text-muted",
-                    if (r %in% c("Admin", "Ganger")) "Click a category, then a sub-category, to find an item. Click an item for its full history, or use Edit/Delete."
+                    if (r %in% c("Admin", "Boss", "Plantman")) "Click a category, then a sub-category, to find an item. Click an item for its full history, or use Edit/Delete."
                     else if (r == "Mechanic") "Click a category, then a sub-category, to find an item and log history."
                     else "Click a category, then a sub-category, to view item details."
         )),
         column(4, style = "text-align:right;",
-               if (r %in% c("Admin", "Ganger")) actionButton("add_item_btn", "+ Add New Item", class = "btn-primary btn-sm"))
+               if (r %in% c("Admin", "Boss", "Plantman")) actionButton("add_item_btn", "+ Add New Item", class = "btn-primary btn-sm"))
       ),
       if (nrow(df) == 0) div(class = "alert alert-secondary", "No plant items yet - add some above.")
       else if (is.null(inv_browse_cat())) {
@@ -1109,7 +1111,7 @@ server <- function(input, output, session) {
       div(class = "card p-3 mb-3", style = paste0("border-top:4px solid ", CATEGORY_COLOUR(row$Category), ";"),
           div(class = "d-flex justify-content-between align-items-start flex-wrap",
               span(class = "plate", style = "font-size:1.3rem; padding:6px 14px;", item_identifier(row)),
-              if (r %in% c("Admin", "Ganger")) div(
+              if (r %in% c("Admin", "Boss", "Plantman")) div(
                 actionButton("detail_edit_btn", "Edit", class = "btn-outline-secondary btn-sm me-2"),
                 actionButton("detail_delete_btn", "Delete", class = "btn-outline-danger btn-sm")
               )
@@ -1136,7 +1138,7 @@ server <- function(input, output, session) {
           ),
           p(strong("Active: "), row$Active),
           p(strong("Notes: "), ifelse(row$Notes == "", "-", row$Notes)),
-          if (r %in% c("Admin", "Mechanic", "Ganger")) actionButton("inv_add_entry_btn", "+ Add History Entry", class = "btn-primary btn-sm")
+          if (r %in% c("Admin", "Boss", "Mechanic", "Plantman")) actionButton("inv_add_entry_btn", "+ Add History Entry", class = "btn-primary btn-sm")
       ),
       h5("History"),
       if (nrow(hist) == 0) div(class = "alert alert-info", "No history yet for this item.")
@@ -1147,7 +1149,7 @@ server <- function(input, output, session) {
         div(class = "history-item", style = if (nrow(linked_row) > 0) "border-left-color:#C9A227;" else NULL,
             div(class = "d-flex justify-content-between align-items-start flex-wrap",
                 div(strong(h$EntryType), span(class = "text-muted", paste0(" - ", h$DateTime))),
-                if (r %in% c("Admin", "Mechanic", "Ganger") && !is.na(h$EntryID) && h$EntryID != "") div(
+                if (r %in% c("Admin", "Boss", "Mechanic", "Plantman") && !is.na(h$EntryID) && h$EntryID != "") div(
                   if (nrow(linked_row) > 0) tags$a(href = "#", style = "font-size:0.8rem; color:#9C2B2B; margin-right:10px;",
                                                    onclick = sprintf("Shiny.setInputValue('unlink_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
                                                    "Unlink")
@@ -1725,9 +1727,9 @@ server <- function(input, output, session) {
         column(6, h5("Gang Sheets")),
         column(6, style = "text-align:right;",
                downloadButton("gang_sheets_download", "Download (CSV)", class = "btn-outline-secondary btn-sm me-2"),
-               if (r %in% c("Admin", "Ganger")) actionButton("new_gang_sheet_btn", "+ Create New Gang Sheet", class = "btn-primary btn-sm"))
+               if (r %in% c("Admin", "Boss", "Plantman")) actionButton("new_gang_sheet_btn", "+ Create New Gang Sheet", class = "btn-primary btn-sm"))
       ),
-      if (r %in% c("Admin", "Ganger") && length(gang_list()) > 0) div(
+      if (r %in% c("Admin", "Boss", "Plantman") && length(gang_list()) > 0) div(
         style = "margin:10px 0 18px;",
         actionButton("bulk_edit_gangs_btn", "Edit All Gang Assignments", class = "btn-warning w-100",
                      style = "font-weight:600; padding:12px; font-size:1.05rem;")
@@ -1747,7 +1749,7 @@ server <- function(input, output, session) {
                                  if (length(detail_bits) > 0) paste0(" (", paste(detail_bits, collapse = " | "), ")") else "")
           accordion_panel(
             title = panel_title, value = g,
-            if (r %in% c("Admin", "Ganger")) div(class = "mb-2",
+            if (r %in% c("Admin", "Boss", "Plantman")) div(class = "mb-2",
                 tags$a(href = "#", style = "font-size:0.85rem; margin-right:12px;",
                        onclick = sprintf("Shiny.setInputValue('edit_gang_click', '%s', {priority:'event'}); return false;", js_escape_sq(g)),
                        "Edit"),
@@ -2161,11 +2163,11 @@ server <- function(input, output, session) {
   invoices_ui <- function(r) {
     tagList(
       br(),
-      p(class = "text-muted", if (r == "Admin") "Add and view invoices." else "View access - Kevin's role."),
+      p(class = "text-muted", if (r %in% c("Admin", "Boss")) "Add and view invoices." else "View access - Kevin's role."),
       fluidRow(
         column(8, NULL),
         column(4, style = "text-align:right;",
-               if (r == "Admin") actionButton("add_invoice_btn", "+ Add Invoice", class = "btn-primary btn-sm"))
+               if (r %in% c("Admin", "Boss")) actionButton("add_invoice_btn", "+ Add Invoice", class = "btn-primary btn-sm"))
       ),
       tabsetPanel(
         type = "pills",
@@ -2213,10 +2215,10 @@ server <- function(input, output, session) {
             div(class = "d-flex align-items-center",
                 span(class = paste0("badge ", ifelse(row$Amount < 0, "bg-warning", "bg-success")),
                      paste0("£", formatC(row$Amount, format = "f", digits = 2))),
-                if (r == "Admin") tags$a(href = "#", style = "font-size:0.85rem; margin-left:12px;",
+                if (r %in% c("Admin", "Boss")) tags$a(href = "#", style = "font-size:0.85rem; margin-left:12px;",
                                          onclick = sprintf("Shiny.setInputValue('edit_invoice_click', '%s', {priority:'event'}); return false;", row$InvoiceID),
                                          "Edit"),
-                if (r == "Admin") tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B; margin-left:10px;",
+                if (r %in% c("Admin", "Boss")) tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B; margin-left:10px;",
                                          onclick = sprintf("Shiny.setInputValue('delete_invoice_click', '%s', {priority:'event'}); return false;", row$InvoiceID),
                                          "Delete")
             )
@@ -3032,14 +3034,14 @@ server <- function(input, output, session) {
   # Built once per role (role() only changes on login/logout, not on
   # every data change, so this doesn't reintroduce the "typing gets
   # wiped mid-edit" bug the cards below were split out to avoid) so
-  # the Ganger role sees just the Ganger List card - nothing else on
+  # the Plantman role sees just the Ganger List card - nothing else on
   # this tab is any of their business. Each card's changeable content
   # still lives in its own narrow uiOutput/tableOutput, so adding a
   # Company/Ganger never tears down the whole accordion.
   output$admin_tab_content <- renderUI({
     r <- role()
     panels <- list()
-    if (r == "Admin") panels[["Google Sheets Sync"]] <- accordion_panel("Google Sheets Sync", value = "Google Sheets Sync",
+    if (r %in% c("Admin", "Boss")) panels[["Google Sheets Sync"]] <- accordion_panel("Google Sheets Sync", value = "Google Sheets Sync",
       div(class = "admin-card",
           p(class = "text-muted",
             if (SHEETS_SYNC_ENABLED)
@@ -3056,19 +3058,19 @@ server <- function(input, output, session) {
           uiOutput("admin_sync_error_ui")
       )
     )
-    if (r == "Admin") panels[["Machines With No Driver"]] <- accordion_panel("Machines With No Driver", value = "Machines With No Driver",
+    if (r %in% c("Admin", "Boss")) panels[["Machines With No Driver"]] <- accordion_panel("Machines With No Driver", value = "Machines With No Driver",
       div(class = "admin-card",
           p(class = "text-muted", "Active plant with nobody currently assigned - worth double-checking these."),
           uiOutput("admin_no_driver_ui")
       )
     )
-    if (r == "Admin") panels[["Staff Activity (This Week)"]] <- accordion_panel("Staff Activity (This Week)", value = "Staff Activity (This Week)",
+    if (r %in% c("Admin", "Boss")) panels[["Staff Activity (This Week)"]] <- accordion_panel("Staff Activity (This Week)", value = "Staff Activity (This Week)",
       div(class = "admin-card",
           p(class = "text-muted", "Quick count of History entries and Invoices logged by each person this week. For a specific week/month or person, use the 'Report by input' filter on the Reports tab."),
           tableOutput("admin_staff_activity_table")
       )
     )
-    if (r == "Admin") panels[["Company List"]] <- accordion_panel("Company List", value = "Company List",
+    if (r %in% c("Admin", "Boss")) panels[["Company List"]] <- accordion_panel("Company List", value = "Company List",
       div(class = "admin-card",
           p(class = "text-muted", "Suppliers/garages available in the Company dropdown when adding an invoice or logging subcontractor mechanic work."),
           fluidRow(
@@ -3078,7 +3080,7 @@ server <- function(input, output, session) {
           uiOutput("admin_company_list_ui")
       )
     )
-    if (r %in% c("Admin", "Ganger")) panels[["Ganger List"]] <- accordion_panel("Ganger List", value = "Ganger List",
+    if (r %in% c("Admin", "Boss", "Plantman")) panels[["Ganger List"]] <- accordion_panel("Ganger List", value = "Ganger List",
       div(class = "admin-card",
           p(class = "text-muted", "Names available in the Ganger dropdown when creating or editing a gang sheet."),
           fluidRow(
