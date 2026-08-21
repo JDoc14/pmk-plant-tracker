@@ -339,6 +339,11 @@ gangs_seed <- character(0)
 # same as Inventory and everything else real.
 gangers_seed <- data.frame(Name = character(0), stringsAsFactors = FALSE)
 gang_meta_seed <- data.frame(Gang = character(0), Ganger = character(0), Location = character(0), stringsAsFactors = FALSE)
+# Admin-only activity log - "wee notices" of who did what (added a
+# history entry, added/edited/deleted a plant item, created/updated a
+# gang sheet), so Admin can see at a glance what non-Admin logins have
+# been doing without digging through Inventory/Whereabouts directly.
+notifications_seed <- data.frame(Time = character(0), User = character(0), Role = character(0), Action = character(0), stringsAsFactors = FALSE)
 plant_history_seed <- data.frame(
   ItemID = character(0), DateTime = character(0), EntryType = character(0),
   Description = character(0), RecordedBy = character(0), InvoiceID = character(0),
@@ -581,6 +586,16 @@ server <- function(input, output, session) {
   ganger_list <- reactiveVal(sort(unique(gangers_loaded$Name[gangers_loaded$Name != ""])))
   companies_loaded <- load_initial_data(companies_seed, "Companies", c("Name"))
   company_list <- reactiveVal(sort(unique(companies_loaded$Name[companies_loaded$Name != ""])))
+  notifications_loaded <- load_initial_data(notifications_seed, "Notifications", c("Time", "User", "Role", "Action"))
+  notifications_log <- reactiveVal(notifications_loaded)
+  # Called after a qualifying action (add history entry, add/edit/
+  # delete plant item, create/update gang sheet) - appends one row,
+  # newest first isn't done here since the table/CSV both sort on
+  # display instead.
+  log_notification <- function(action) {
+    new_row <- data.frame(Time = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), User = user_name(), Role = role(), Action = action, stringsAsFactors = FALSE)
+    notifications_log(bind_rows(notifications_log(), new_row))
+  }
   gang_meta_loaded <- load_initial_data(gang_meta_seed, "GangMeta", c("Gang", "Ganger", "Location"))
   gang_meta <- reactiveVal(gang_meta_loaded)
   # gang_list used to just start empty every session (a bug - gang
@@ -628,6 +643,7 @@ server <- function(input, output, session) {
   ganger_debounced <- debounce(ganger_list, 4000)
   company_debounced <- debounce(company_list, 4000)
   gang_meta_debounced <- debounce(gang_meta, 4000)
+  notifications_debounced <- debounce(notifications_log, 4000)
   run_full_sync <- function() {
     ok <- c(
       sync_to_sheets(inventory_data(), "Inventory"),
@@ -635,7 +651,8 @@ server <- function(input, output, session) {
       sync_to_sheets(plant_history(), "Plant History"),
       sync_to_sheets(data.frame(Name = ganger_list(), stringsAsFactors = FALSE), "Gangers"),
       sync_to_sheets(data.frame(Name = company_list(), stringsAsFactors = FALSE), "Companies"),
-      sync_to_sheets(gang_meta(), "GangMeta")
+      sync_to_sheets(gang_meta(), "GangMeta"),
+      sync_to_sheets(notifications_log(), "Notifications")
     )
     if (all(ok)) { sheets_last_synced(Sys.time()); sheets_last_error(NULL) }
     else sheets_last_error(paste0("Sync failed at ", format(Sys.time(), "%H:%M:%S"), " - check the R console for details."))
@@ -664,6 +681,11 @@ server <- function(input, output, session) {
     if (!SHEETS_SYNC_ENABLED) return()
     ok <- sync_to_sheets(data.frame(Name = company_debounced(), stringsAsFactors = FALSE), "Companies")
     if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Company list sync failed at ", format(Sys.time(), "%H:%M:%S")))
+  }, ignoreInit = TRUE)
+  observeEvent(notifications_debounced(), {
+    if (!SHEETS_SYNC_ENABLED) return()
+    ok <- sync_to_sheets(notifications_debounced(), "Notifications")
+    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Notifications sync failed at ", format(Sys.time(), "%H:%M:%S")))
   }, ignoreInit = TRUE)
   observeEvent(gang_meta_debounced(), {
     if (!SHEETS_SYNC_ENABLED) return()
@@ -802,6 +824,7 @@ server <- function(input, output, session) {
     if (r %in% c("Admin", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
     if (r %in% c("Admin", "Mechanic")) tabs[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
     if (r %in% c("Admin", "Ganger")) tabs[["Admin"]] <- uiOutput("admin_tab_content")
+    if (r == "Admin") tabs[["Notifications"]] <- uiOutput("notifications_tab_content")
     do.call(tabsetPanel, c(
       list(id = "main_tabs", selected = "Home"),
       lapply(names(tabs), function(nm) tabPanel(nm, tabs[[nm]])),
@@ -1450,6 +1473,9 @@ server <- function(input, output, session) {
     removeModal()
     if (is_subcontractor) showNotification("Entry saved, and logged as an Invoice too.", type = "message")
     else showNotification("Entry saved.", type = "message")
+    item_row_for_log <- df[df$ItemID == iid, ]
+    log_notification(paste0("Logged '", input$ih_type, "' on ",
+                            if (nrow(item_row_for_log) > 0) item_identifier(item_row_for_log[1, ]) else iid))
   })
   # ---- Link / Unlink History entries ----
   # Retroactively links two existing entries on the same item (e.g. a
@@ -1640,6 +1666,7 @@ server <- function(input, output, session) {
       row_data$Gang <- ""
       df <- bind_rows(df, row_data)
       showNotification("Item added.", type = "message")
+      log_notification(paste0("Added plant item ", item_identifier(row_data)))
     } else {
       iid <- editing_item()
       keep_cols <- c("ItemID", "Gang")
@@ -1649,6 +1676,7 @@ server <- function(input, output, session) {
       df <- df[df$ItemID != iid, ]
       df <- bind_rows(df, row_data)
       showNotification("Item updated.", type = "message")
+      log_notification(paste0("Updated plant item ", item_identifier(row_data)))
     }
     inventory_data(df)
     editing_item(NULL)
@@ -1674,10 +1702,13 @@ server <- function(input, output, session) {
   })
   observeEvent(input$confirm_delete_item, {
     iid <- session$userData$pending_delete_item
-    df <- inventory_data(); df <- df[df$ItemID != iid, ]; inventory_data(df)
+    df <- inventory_data()
+    old_row <- df[df$ItemID == iid, ]
+    df <- df[df$ItemID != iid, ]; inventory_data(df)
     if (identical(inv_selected(), iid)) { inv_view("list"); inv_selected(NULL) }
     removeModal()
     showNotification("Item removed.", type = "message")
+    if (nrow(old_row) > 0) log_notification(paste0("Deleted plant item ", item_identifier(old_row[1, ])))
   })
   # -------------------------------------------------------------
   # PLANT WHEREABOUTS - "Gang Sheets"
@@ -1800,19 +1831,39 @@ server <- function(input, output, session) {
     filename = function() paste0("pmk_gang_sheets_", Sys.Date(), ".csv"),
     content = function(file) write.csv(gang_sheet_export_data(), file, row.names = FALSE)
   )
-  gang_sheet_form <- function(pool_df, selected_ids = character(0)) {
+  # elsewhere_df (optional) is plant assigned to a DIFFERENT gang -
+  # shown at the bottom of each sub-category as a second, clearly
+  # labelled checkbox group so a mis-assigned item can be swapped
+  # straight onto this gang instead of having to un-assign it first.
+  # Ticking one just moves it - the save handlers already set Gang
+  # on every ticked ItemID, whichever gang it came from.
+  gang_sheet_form <- function(pool_df, selected_ids = character(0), elsewhere_df = NULL) {
+    if (is.null(elsewhere_df)) elsewhere_df <- pool_df[0, ]
     lapply(CATEGORY_OPTIONS, function(cat) {
       cat_rows <- pool_df[pool_df$Category == cat, ]
-      subcats <- subcats_for(cat, pool_df)
+      elsewhere_cat <- elsewhere_df[elsewhere_df$Category == cat, ]
+      subcats <- union(subcats_for(cat, pool_df), subcats_for(cat, elsewhere_cat))
       sub_panels <- lapply(subcats, function(sub) {
         sub_rows <- natural_sort_rows(cat_rows[cat_rows$SubCategory == sub, ])
+        elsewhere_rows <- natural_sort_rows(elsewhere_cat[elsewhere_cat$SubCategory == sub, ])
         accordion_panel(
           title = paste0(sub, " (", nrow(sub_rows), " available)"),
           value = paste0(cat, "___", sub),
-          if (nrow(sub_rows) == 0) p(class = "text-muted mb-0", "None available.")
-          else checkboxGroupInput(paste0("gang_form_", make.names(cat), "_", make.names(sub)), NULL,
-                                  choices = setNames(sub_rows$ItemID, paste0(ifelse(sub_rows$Machine == "", "(no machine name)", sub_rows$Machine), " - ", vapply(seq_len(nrow(sub_rows)), function(i) item_identifier(sub_rows[i, ]), character(1)))),
-                                  selected = intersect(sub_rows$ItemID, selected_ids))
+          tagList(
+            if (nrow(sub_rows) == 0 && nrow(elsewhere_rows) == 0) p(class = "text-muted mb-0", "None available.")
+            else if (nrow(sub_rows) > 0) checkboxGroupInput(paste0("gang_form_", make.names(cat), "_", make.names(sub)), NULL,
+                                    choices = setNames(sub_rows$ItemID, paste0(ifelse(sub_rows$Machine == "", "(no machine name)", sub_rows$Machine), " - ", vapply(seq_len(nrow(sub_rows)), function(i) item_identifier(sub_rows[i, ]), character(1)))),
+                                    selected = intersect(sub_rows$ItemID, selected_ids)),
+            if (nrow(elsewhere_rows) > 0) tagList(
+              div(class = "text-muted", style = "font-size:0.8rem; margin:4px 0 2px;",
+                  "Already assigned to another gang - ticking one swaps it onto this gang instead:"),
+              checkboxGroupInput(paste0("gang_form_swap_", make.names(cat), "_", make.names(sub)), NULL,
+                                 choices = setNames(elsewhere_rows$ItemID,
+                                                    paste0(ifelse(elsewhere_rows$Machine == "", "(no machine name)", elsewhere_rows$Machine), " - ",
+                                                           vapply(seq_len(nrow(elsewhere_rows)), function(i) item_identifier(elsewhere_rows[i, ]), character(1)),
+                                                           "  [currently on ", elsewhere_rows$Gang, "]")))
+            )
+          )
         )
       })
       accordion_panel(
@@ -1828,7 +1879,8 @@ server <- function(input, output, session) {
     pairs <- unique(df[, c("Category", "SubCategory")])
     unlist(lapply(seq_len(nrow(pairs)), function(i) {
       cat <- pairs$Category[i]; sub <- pairs$SubCategory[i]
-      input[[paste0("gang_form_", make.names(cat), "_", make.names(sub))]]
+      c(input[[paste0("gang_form_", make.names(cat), "_", make.names(sub))]],
+        input[[paste0("gang_form_swap_", make.names(cat), "_", make.names(sub))]])
     }))
   }
   ganger_choices <- function() setNames(c("", ganger_list()), c("None", ganger_list()))
@@ -1847,6 +1899,7 @@ server <- function(input, output, session) {
   observeEvent(input$new_gang_sheet_btn, {
     df <- inventory_data()
     unassigned <- df[df$Gang == "" | is.na(df$Gang), ]
+    elsewhere <- df[df$Gang != "" & !is.na(df$Gang), ]
     removeModal()  # ensure any stale modal is torn down before opening a new one
     showModal(modalDialog(
       title = "Create New Gang Sheet", size = "l",
@@ -1855,8 +1908,8 @@ server <- function(input, output, session) {
         column(6, selectInput("gang_form_ganger", "Ganger (optional)", choices = ganger_choices(), selected = ""))
       ),
       textInput("gang_form_location", "Location (optional)", placeholder = "e.g. Site name / postcode"),
-      p(class = "text-muted", "Tick which unassigned plant belongs to this gang."),
-      do.call(accordion, c(list(id = "gang_form_accordion", open = TRUE), gang_sheet_form(unassigned))),
+      p(class = "text-muted", "Tick which unassigned plant belongs to this gang. Plant already on another gang sheet is listed at the bottom of each section in case it was assigned by mistake - ticking it moves it here."),
+      do.call(accordion, c(list(id = "gang_form_accordion", open = TRUE), gang_sheet_form(unassigned, elsewhere_df = elsewhere))),
       footer = tagList(modalButton("Cancel"), actionButton("gang_form_submit_new", "Create Gang Sheet", class = "btn-primary"))
     ))
   })
@@ -1865,6 +1918,7 @@ server <- function(input, output, session) {
     editing_gang(g)
     df <- inventory_data()
     pool <- df[df$Gang == g | df$Gang == "" | is.na(df$Gang), ]
+    elsewhere <- df[df$Gang != "" & !is.na(df$Gang) & df$Gang != g, ]
     current <- df$ItemID[df$Gang == g]
     meta_row <- gang_meta()[gang_meta()$Gang == g, ]
     cur_ganger <- if (nrow(meta_row) > 0) meta_row$Ganger[1] else ""
@@ -1876,8 +1930,8 @@ server <- function(input, output, session) {
         column(6, selectInput("gang_form_ganger_edit", "Ganger (optional)", choices = ganger_choices(), selected = cur_ganger)),
         column(6, textInput("gang_form_location_edit", "Location (optional)", value = cur_location, placeholder = "e.g. Site name / postcode"))
       ),
-      p(class = "text-muted", "Tick which plant belongs to this gang. Plant assigned to other gangs isn't shown here."),
-      do.call(accordion, c(list(id = "gang_form_accordion_edit", open = TRUE), gang_sheet_form(pool, current))),
+      p(class = "text-muted", "Tick which plant belongs to this gang. Plant on another gang sheet is listed at the bottom of each section in case it was assigned by mistake - ticking it moves it here."),
+      do.call(accordion, c(list(id = "gang_form_accordion_edit", open = TRUE), gang_sheet_form(pool, current, elsewhere_df = elsewhere))),
       footer = tagList(modalButton("Cancel"), actionButton("gang_form_submit_edit", "Save Gang Sheet", class = "btn-primary"))
     ))
   })
@@ -1910,6 +1964,7 @@ server <- function(input, output, session) {
     save_gang_meta(name, ganger, input$gang_form_location)
     removeModal()
     showNotification(paste0("Gang sheet '", name, "' created with ", length(ticked), " item(s)."), type = "message")
+    log_notification(paste0("Created gang sheet '", name, "' with ", length(ticked), " item(s)"))
   })
   observeEvent(input$gang_form_submit_edit, {
     name <- editing_gang(); req(name)
@@ -1931,6 +1986,7 @@ server <- function(input, output, session) {
     save_gang_meta(name, ganger, input$gang_form_location_edit)
     removeModal(); editing_gang(NULL)
     showNotification(paste0("Gang sheet '", name, "' updated."), type = "message")
+    log_notification(paste0("Updated gang sheet '", name, "' (", length(ticked), " item(s) assigned)"))
   })
   observeEvent(input$delete_gang_click, {
     g <- input$delete_gang_click
@@ -2993,5 +3049,35 @@ server <- function(input, output, session) {
     company_list(setdiff(company_list(), nm))
     showNotification(paste0("'", nm, "' removed from the Company list."), type = "message")
   })
+  # -------------------------------------------------------------
+  # NOTIFICATIONS - Admin-only activity feed (see log_notification()
+  # above). Deliberately no clear/delete UI yet - kept as a running
+  # log for now, tidied up manually via the Google Sheet.
+  # -------------------------------------------------------------
+  output$notifications_tab_content <- renderUI({ notifications_ui() })
+  notifications_ui <- function() {
+    tagList(
+      br(),
+      fluidRow(
+        column(8, p(class = "text-muted", "What non-Admin logins have been doing - newest first.")),
+        column(4, style = "text-align:right;", downloadButton("notifications_download", "Download (CSV)", class = "btn-outline-secondary btn-sm"))
+      ),
+      tableOutput("notifications_table")
+    )
+  }
+  notifications_sorted <- reactive({
+    n <- notifications_log()
+    if (nrow(n) == 0) return(n)
+    n[order(n$Time, decreasing = TRUE), ]
+  })
+  output$notifications_table <- renderTable({
+    n <- notifications_sorted()
+    if (nrow(n) == 0) return(data.frame(Message = "No activity logged yet."))
+    n
+  })
+  output$notifications_download <- downloadHandler(
+    filename = function() paste0("pmk_notifications_", Sys.Date(), ".csv"),
+    content = function(file) write.csv(notifications_sorted(), file, row.names = FALSE)
+  )
 }
 shinyApp(ui, server)
