@@ -139,7 +139,7 @@ load_initial_data <- function(seed_df, tab_name, sheet_cols) {
 #        Value: yourNewPassword123|Admin|Full Name Here
 #   3. Do this for: PMK_LOGIN_SEAN, PMK_LOGIN_JACK,
 #      PMK_LOGIN_MECHANIC1, PMK_LOGIN_KEVIN, PMK_LOGIN_AGENT1,
-#      PMK_LOGIN_GUEST, PMK_LOGIN_EVANPMK. Roles are Admin / Admin /
+#      PMK_LOGIN_GUEST, PMK_LOGIN_EVAN. Roles are Admin / Admin /
 #      Mechanic / Kevin / Agent / Guest / Ganger respectively. The
 #      "Ganger" role can access and edit Inventory List and Plant
 #      Whereabouts, plus just the Ganger List card on Admin - nothing
@@ -150,7 +150,7 @@ load_initial_data <- function(seed_df, tab_name, sheet_cols) {
 # same user/password/role/name columns as before.
 # ---------------------------------------------------------------
 build_credentials_from_env <- function() {
-  users <- c("sean", "jack", "mechanic1", "kevin", "agent1", "guest", "evanpmk")
+  users <- c("sean", "jack", "mechanic1", "kevin", "agent1", "guest", "evan")
   rows <- lapply(users, function(u) {
     raw <- Sys.getenv(paste0("PMK_LOGIN_", toupper(u)), unset = "")
     if (!nzchar(raw)) return(NULL)
