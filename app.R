@@ -1727,6 +1727,11 @@ server <- function(input, output, session) {
                downloadButton("gang_sheets_download", "Download (CSV)", class = "btn-outline-secondary btn-sm me-2"),
                if (r %in% c("Admin", "Ganger")) actionButton("new_gang_sheet_btn", "+ Create New Gang Sheet", class = "btn-primary btn-sm"))
       ),
+      if (r %in% c("Admin", "Ganger") && length(gang_list()) > 0) div(
+        style = "margin:10px 0 18px;",
+        actionButton("bulk_edit_gangs_btn", "Edit All Gang Assignments", class = "btn-warning w-100",
+                     style = "font-weight:600; padding:12px; font-size:1.05rem;")
+      ),
       if (length(gang_list()) == 0) div(class = "alert alert-secondary", "No gang sheets yet.")
       else {
         gang_panel_for <- function(g) {
@@ -1987,6 +1992,147 @@ server <- function(input, output, session) {
     removeModal(); editing_gang(NULL)
     showNotification(paste0("Gang sheet '", name, "' updated."), type = "message")
     log_notification(paste0("Updated gang sheet '", name, "' (", length(ticked), " item(s) assigned)"))
+  })
+  # ---- Bulk "Edit All Gang Assignments" ----
+  # A full reset-and-rebuild of every gang sheet at once: every gang
+  # gets its own blank Ganger/Location + plant picker (same picker as
+  # Create/Edit, just one per gang, namespaced by input ID so they
+  # don't collide), and nothing starts pre-ticked - you're rebuilding
+  # the whole board from a blank slate, not editing on top of what's
+  # already there. Nothing is written to Inventory until Save/Sync.
+  bulk_gang_form_for <- function(gid, pool_df) {
+    lapply(CATEGORY_OPTIONS, function(cat) {
+      cat_rows <- pool_df[pool_df$Category == cat, ]
+      subcats <- subcats_for(cat, pool_df)
+      sub_panels <- lapply(subcats, function(sub) {
+        sub_rows <- natural_sort_rows(cat_rows[cat_rows$SubCategory == sub, ])
+        accordion_panel(
+          title = paste0(sub, " (", nrow(sub_rows), ")"),
+          value = paste0(cat, "___", sub),
+          if (nrow(sub_rows) == 0) p(class = "text-muted mb-0", "None.")
+          else checkboxGroupInput(paste0("bulk_", gid, "_", make.names(cat), "_", make.names(sub)), NULL,
+                                  choices = setNames(sub_rows$ItemID, paste0(ifelse(sub_rows$Machine == "", "(no machine name)", sub_rows$Machine), " - ", vapply(seq_len(nrow(sub_rows)), function(i) item_identifier(sub_rows[i, ]), character(1)))),
+                                  selected = character(0))
+        )
+      })
+      accordion_panel(
+        title = paste0(cat, " (", nrow(cat_rows), ")"),
+        value = cat,
+        if (length(sub_panels) == 0) p(class = "text-muted mb-0", "None.")
+        else do.call(accordion, c(list(id = paste0("bulk_sub_", gid, "_", make.names(cat))), sub_panels))
+      )
+    })
+  }
+  collect_bulk_ticked_items <- function(gid) {
+    df <- inventory_data()
+    pairs <- unique(df[, c("Category", "SubCategory")])
+    unlist(lapply(seq_len(nrow(pairs)), function(i) {
+      cat <- pairs$Category[i]; sub <- pairs$SubCategory[i]
+      input[[paste0("bulk_", gid, "_", make.names(cat), "_", make.names(sub))]]
+    }))
+  }
+  observeEvent(input$bulk_edit_gangs_btn, {
+    gl <- gang_list()
+    req(length(gl) > 0)
+    df <- inventory_data()
+    removeModal()
+    showModal(modalDialog(
+      title = "Edit All Gang Assignments", size = "l", easyClose = FALSE,
+      div(class = "alert alert-warning",
+          "Every gang below starts blank - nothing is ticked and no Ganger/Location is pre-filled, even though the real assignments still exist until you save. Tick each gang's plant and re-enter its Ganger/Location, then hit Save/Sync at the bottom. Anything you leave unticked for every gang becomes unassigned."),
+      tagList(lapply(gl, function(g) {
+        gid <- make.names(g)
+        tagList(
+          h5(g, style = "margin-top:18px;"),
+          fluidRow(
+            column(6, selectInput(paste0("bulk_ganger_", gid), "Ganger (optional)", choices = ganger_choices(), selected = "")),
+            column(6, textInput(paste0("bulk_location_", gid), "Location (optional)", value = "", placeholder = "e.g. Site name / postcode"))
+          ),
+          do.call(accordion, c(list(id = paste0("bulk_accordion_", gid), open = FALSE), bulk_gang_form_for(gid, df)))
+        )
+      })),
+      footer = tagList(modalButton("Cancel"), actionButton("bulk_edit_save", "Save / Sync", class = "btn-primary"))
+    ))
+  })
+  observeEvent(input$bulk_edit_save, {
+    gl <- gang_list()
+    df <- inventory_data()
+    old_gang <- setNames(df$Gang, df$ItemID)
+    assignments <- list()
+    all_ticked <- character(0)
+    conflicts <- character(0)
+    for (g in gl) {
+      gid <- make.names(g)
+      ticked <- collect_bulk_ticked_items(gid)
+      assignments[[g]] <- ticked
+      conflicts <- union(conflicts, intersect(all_ticked, ticked))
+      all_ticked <- union(all_ticked, ticked)
+    }
+    if (length(conflicts) > 0) {
+      labels <- vapply(conflicts, function(id) {
+        row <- df[df$ItemID == id, ]
+        if (nrow(row) > 0) item_identifier(row[1, ]) else id
+      }, character(1))
+      showNotification(paste0("These item(s) are ticked under more than one gang - untick the duplicate(s) before saving: ", paste(labels, collapse = ", ")),
+                        type = "error", duration = 12)
+      return()
+    }
+    gang_gangers <- setNames(character(0), character(0))
+    for (g in gl) {
+      gid <- make.names(g)
+      ticked <- assignments[[g]]
+      ganger <- trimws(input[[paste0("bulk_ganger_", gid)]])
+      location <- trimws(input[[paste0("bulk_location_", gid)]])
+      gang_gangers[g] <- ganger
+      df$Gang[df$ItemID %in% ticked] <- g
+      if (ganger != "") df$Driver[df$ItemID %in% ticked] <- ganger
+      if (location != "") df$Location[df$ItemID %in% ticked] <- location
+      save_gang_meta(g, ganger, location)
+    }
+    # Anything not ticked for any gang goes back to Unassigned - this
+    # is a full rebuild, not an incremental edit.
+    df$Gang[!(df$ItemID %in% all_ticked)] <- ""
+    # Log a history entry only for items whose gang actually changed -
+    # nothing for plant that stayed put.
+    changed_ids <- df$ItemID[vapply(df$ItemID, function(id) !identical(old_gang[[id]], df$Gang[df$ItemID == id][1]), logical(1))]
+    if (length(changed_ids) > 0) {
+      # next_entry_id() reads plant_history() live - calling it once
+      # per new row here would hand out the SAME id to every row since
+      # plant_history() isn't updated until after this loop. Reserve a
+      # block of ids up front and increment locally instead.
+      existing_nums <- suppressWarnings(as.integer(gsub("HIST-", "", plant_history()$EntryID)))
+      existing_nums <- existing_nums[!is.na(existing_nums)]
+      start_n <- if (length(existing_nums) == 0) 1 else max(existing_nums) + 1
+      new_entries <- lapply(seq_along(changed_ids), function(idx) {
+        id <- changed_ids[idx]
+        entry_id <- sprintf("HIST-%04d", start_n + idx - 1)
+        new_g <- df$Gang[df$ItemID == id][1]
+        if (new_g != "") {
+          ganger <- gang_gangers[[new_g]]
+          if (!is.null(ganger) && ganger != "") {
+            data.frame(ItemID = id, DateTime = format(Sys.time(), "%Y-%m-%d %H:%M"),
+                       EntryType = "Driver Assigned", Description = ganger, RecordedBy = user_name(),
+                       InvoiceID = NA_character_, EntryID = entry_id, LinkedEntryID = NA_character_,
+                       stringsAsFactors = FALSE)
+          } else {
+            data.frame(ItemID = id, DateTime = format(Sys.time(), "%Y-%m-%d %H:%M"),
+                       EntryType = "Note", Description = paste0("Moved to gang ", new_g), RecordedBy = user_name(),
+                       InvoiceID = NA_character_, EntryID = entry_id, LinkedEntryID = NA_character_,
+                       stringsAsFactors = FALSE)
+          }
+        } else {
+          data.frame(ItemID = id, DateTime = format(Sys.time(), "%Y-%m-%d %H:%M"),
+                     EntryType = "Note", Description = "Removed from gang assignment", RecordedBy = user_name(),
+                     InvoiceID = NA_character_, EntryID = entry_id, LinkedEntryID = NA_character_,
+                     stringsAsFactors = FALSE)
+        }
+      })
+      plant_history(bind_rows(plant_history(), do.call(rbind, new_entries)))
+    }
+    inventory_data(df)
+    removeModal()
+    showNotification(paste0("All gang assignments saved and synced - ", length(changed_ids), " item(s) moved."), type = "message")
+    log_notification(paste0("Bulk-edited all gang assignments (", length(changed_ids), " item(s) moved)"))
   })
   observeEvent(input$delete_gang_click, {
     g <- input$delete_gang_click
