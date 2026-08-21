@@ -285,6 +285,11 @@ parse_flex_date <- function(x) {
   out
 }
 floor_to_monday <- function(d) { d - (as.integer(format(d, "%u")) - 1) }
+# Escapes a single quote for safe embedding inside a JS string literal
+# delimited by single quotes (used for the Delete links' onclick=
+# handlers below) - without this, a name like "Charlie O'Donnel"
+# breaks the embedded JavaScript and makes that Delete link a no-op.
+js_escape_sq <- function(x) gsub("'", "\\\\'", x, fixed = TRUE)
 # ---------------------------------------------------------------
 # COMPANY LIST - suppliers/garages used for the invoice Company
 # dropdown, managed by Admin (add/delete), same pattern as Gangers.
@@ -1705,10 +1710,10 @@ server <- function(input, output, session) {
             title = panel_title, value = g,
             if (r == "Admin") div(class = "mb-2",
                 tags$a(href = "#", style = "font-size:0.85rem; margin-right:12px;",
-                       onclick = sprintf("Shiny.setInputValue('edit_gang_click', '%s', {priority:'event'}); return false;", g),
+                       onclick = sprintf("Shiny.setInputValue('edit_gang_click', '%s', {priority:'event'}); return false;", js_escape_sq(g)),
                        "Edit"),
                 tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
-                       onclick = sprintf("Shiny.setInputValue('delete_gang_click', '%s', {priority:'event'}); return false;", g),
+                       onclick = sprintf("Shiny.setInputValue('delete_gang_click', '%s', {priority:'event'}); return false;", js_escape_sq(g)),
                        "Delete")
             ),
             if (nrow(g_rows) == 0) p(class = "text-muted mb-0", "No plant assigned.")
@@ -2878,7 +2883,7 @@ server <- function(input, output, session) {
       div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
           span(nm),
           tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
-                 onclick = sprintf("Shiny.setInputValue('delete_company_click', '%s', {priority:'event'}); return false;", nm),
+                 onclick = sprintf("Shiny.setInputValue('delete_company_click', '%s', {priority:'event'}); return false;", js_escape_sq(nm)),
                  "Delete")
       )
     }))
@@ -2889,7 +2894,7 @@ server <- function(input, output, session) {
       div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
           span(nm),
           tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
-                 onclick = sprintf("Shiny.setInputValue('delete_ganger_click', '%s', {priority:'event'}); return false;", nm),
+                 onclick = sprintf("Shiny.setInputValue('delete_ganger_click', '%s', {priority:'event'}); return false;", js_escape_sq(nm)),
                  "Delete")
       )
     }))
