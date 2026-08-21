@@ -287,18 +287,12 @@ parse_flex_date <- function(x) {
 floor_to_monday <- function(d) { d - (as.integer(format(d, "%u")) - 1) }
 # ---------------------------------------------------------------
 # COMPANY LIST - suppliers/garages used for the invoice Company
-# dropdown. Add or remove names here as your supplier list changes.
+# dropdown, managed by Admin (add/delete), same pattern as Gangers.
+# Deliberately empty - real supplier names live only in the Google
+# Sheet / Admin UI, not hardcoded in this file (it lives in a public
+# GitHub repo).
 # ---------------------------------------------------------------
-COMPANY_LIST <- c(
-  "Arnold Clark", "Astrak", "Dingbro", "Hydraquip", "HTS Spares", "Hydralink",
-  "Indespension", "Zenith", "Jepson & Co", "Motus Commercials", "MV Commercial",
-  "NAPA", "Quickshift", "Redpath Tyres", "Scot JCB", "Rudden Mechanicals",
-  "Briggs Equipment", "HRN", "Netherton Tractors", "LGH Winches", "McNicoll",
-  "MPG", "Palfinger UK", "Pirtek", "Scotia", "Stirling Trailer Centre",
-  "Logistics UK", "Finning CAT", "West of Scotland Engineering", "Scania",
-  "Kaen Yuill Recovery", "Emtelle", "McCluskey Glazing", "Euro",
-  "A M Philips Trucktech"
-)
+companies_seed <- data.frame(Name = character(0), stringsAsFactors = FALSE)
 # ---------------------------------------------------------------
 # INVENTORY - local fallback seed only, loaded from
 # initial_inventory_seed.csv (real fleet data lives there, not in
@@ -311,7 +305,7 @@ COMPANY_LIST <- c(
 INVENTORY_SEED_CSV <- "initial_inventory_seed.csv"
 inventory_cols <- c("ItemID", "Category", "SubCategory", "Machine", "PMK_Number",
                     "Registration", "SerialNumber", "Driver", "Location", "Gang",
-                    "DatePurchased", "WarrantyEndDate", "MOTDue", "Active", "OnHire", "Notes",
+                    "DatePurchased", "WarrantyEndDate", "MOTDue", "Active", "Notes",
                     "TruckServiceRequired", "Hours")
 inventory_seed <- if (file.exists(INVENTORY_SEED_CSV)) {
   df <- read.csv(INVENTORY_SEED_CSV, colClasses = "character", stringsAsFactors = FALSE)
@@ -425,8 +419,6 @@ item_row <- function(row, r, clickable = TRUE, show_actions = TRUE) {
             p(class = "mb-1", paste("Driver:", ifelse(row$Driver == "", "Unassigned", row$Driver))),
             if (row$Location != "") p(class = "mb-1 text-muted", style = "font-size:0.8rem;", paste("Location:", row$Location)),
             span(class = paste0("badge ", ifelse(row$Active == "Yes", "bg-success", "bg-secondary")), row$Active),
-            " ",
-            if (row$OnHire == "Yes") span(class = "badge bg-warning", "On Hire"),
             if (r == "Admin" && show_actions) div(style = "margin-top:6px;",
                                                   tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
                                                          onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('edit_item_click', '%s', {priority:'event'}); return false;", row$ItemID),
@@ -499,6 +491,12 @@ app_ui <- fluidPage(
         margin-bottom:8px; transition:0.1s; }
       .plant-row:hover { border-color:#C9A227; }
       .plant-row:focus { outline:3px solid #C9A227; outline-offset:-3px; }
+      .browse-tile { cursor:pointer; background:#fff; border:1px solid #E2DFD6; border-top:4px solid #0B4D3A;
+        border-radius:6px; padding:18px 14px; margin-bottom:14px; text-align:center; transition:0.1s; }
+      .browse-tile:hover { border-color:#C9A227; border-top-color:#C9A227; box-shadow:0 2px 6px rgba(0,0,0,0.08); }
+      .browse-tile:focus { outline:3px solid #C9A227; outline-offset:-3px; }
+      .browse-tile .tile-title { font-family:'Oswald',sans-serif; font-size:1.05rem; color:#0B4D3A; text-transform:uppercase; letter-spacing:0.5px; }
+      .browse-tile .tile-count { color:#5B6770; font-size:0.85rem; margin-top:4px; }
       h3,h4,h5,h6 { font-family:'Oswald',sans-serif; }
       .gang-card { background:#fff; border:1px solid #E2DFD6; border-radius:4px;
         padding:14px; margin-bottom:12px; }
@@ -573,6 +571,8 @@ server <- function(input, output, session) {
   inventory_data <- reactiveVal(inventory_loaded)
   gangers_loaded <- load_initial_data(gangers_seed, "Gangers", c("Name"))
   ganger_list <- reactiveVal(sort(unique(gangers_loaded$Name[gangers_loaded$Name != ""])))
+  companies_loaded <- load_initial_data(companies_seed, "Companies", c("Name"))
+  company_list <- reactiveVal(sort(unique(companies_loaded$Name[companies_loaded$Name != ""])))
   gang_meta_loaded <- load_initial_data(gang_meta_seed, "GangMeta", c("Gang", "Ganger", "Location"))
   gang_meta <- reactiveVal(gang_meta_loaded)
   # gang_list used to just start empty every session (a bug - gang
@@ -602,6 +602,8 @@ server <- function(input, output, session) {
   invoices_data <- reactiveVal(invoices_loaded)
   inv_view <- reactiveVal("list")        # "list" or "detail", for Inventory tab
   inv_selected <- reactiveVal(NULL)
+  inv_browse_cat <- reactiveVal(NULL)    # Inventory List tile drill-down: NULL = category tiles
+  inv_browse_sub <- reactiveVal(NULL)    # NULL = sub-category tiles (once a category is picked)
   editing_item <- reactiveVal(NULL)
   editing_gang <- reactiveVal(NULL)
   editing_invoice <- reactiveVal(NULL)
@@ -616,6 +618,7 @@ server <- function(input, output, session) {
   invoices_debounced <- debounce(invoices_data, 4000)
   history_debounced <- debounce(plant_history, 4000)
   ganger_debounced <- debounce(ganger_list, 4000)
+  company_debounced <- debounce(company_list, 4000)
   gang_meta_debounced <- debounce(gang_meta, 4000)
   run_full_sync <- function() {
     ok <- c(
@@ -623,6 +626,7 @@ server <- function(input, output, session) {
       sync_to_sheets(invoices_data(), "Invoices"),
       sync_to_sheets(plant_history(), "Plant History"),
       sync_to_sheets(data.frame(Name = ganger_list(), stringsAsFactors = FALSE), "Gangers"),
+      sync_to_sheets(data.frame(Name = company_list(), stringsAsFactors = FALSE), "Companies"),
       sync_to_sheets(gang_meta(), "GangMeta")
     )
     if (all(ok)) { sheets_last_synced(Sys.time()); sheets_last_error(NULL) }
@@ -647,6 +651,11 @@ server <- function(input, output, session) {
     if (!SHEETS_SYNC_ENABLED) return()
     ok <- sync_to_sheets(data.frame(Name = ganger_debounced(), stringsAsFactors = FALSE), "Gangers")
     if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Ganger list sync failed at ", format(Sys.time(), "%H:%M:%S")))
+  }, ignoreInit = TRUE)
+  observeEvent(company_debounced(), {
+    if (!SHEETS_SYNC_ENABLED) return()
+    ok <- sync_to_sheets(data.frame(Name = company_debounced(), stringsAsFactors = FALSE), "Companies")
+    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Company list sync failed at ", format(Sys.time(), "%H:%M:%S")))
   }, ignoreInit = TRUE)
   observeEvent(gang_meta_debounced(), {
     if (!SHEETS_SYNC_ENABLED) return()
@@ -783,6 +792,7 @@ server <- function(input, output, session) {
     if (r %in% c("Admin", "Kevin")) tabs[["Invoices"]] <- uiOutput("invoices_tab_content")
     if (r %in% c("Admin", "Kevin")) tabs[["Reports"]] <- uiOutput("reports_tab_content")
     if (r %in% c("Admin", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
+    if (r %in% c("Admin", "Mechanic")) tabs[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
     if (r == "Admin") tabs[["Admin"]] <- uiOutput("admin_tab_content")
     do.call(tabsetPanel, c(
       list(id = "main_tabs", selected = "Home"),
@@ -796,18 +806,19 @@ server <- function(input, output, session) {
   output$home_tab_content <- renderUI({
     r <- role()
     df <- inventory_data()
-    n_plant <- nrow(df); n_active <- sum(df$Active == "Yes"); n_hire <- sum(df$OnHire == "Yes")
-    n_gangs <- length(gang_list())
+    n_plant <- nrow(df)
+    n_history <- nrow(plant_history())
     n_invoices_home <- if (r %in% c("Admin", "Kevin")) nrow(invoices_data()) else NA
     due_soon <- due_within(30)
     n_due_soon <- nrow(due_soon)
-    ts_due <- truck_service_due(7)
+    ts_due <- truck_service_due(14)
     n_ts_due <- nrow(ts_due)
     quick_links <- c("Inventory List")
     if (r %in% c("Admin", "Mechanic", "Agent")) quick_links <- c(quick_links, "Plant Whereabouts")
     if (r %in% c("Admin", "Kevin")) quick_links <- c(quick_links, "Invoices")
     if (r %in% c("Admin", "Kevin")) quick_links <- c(quick_links, "Reports")
     if (r %in% c("Admin", "Mechanic")) quick_links <- c(quick_links, "Job Cards & Inspections")
+    if (r %in% c("Admin", "Mechanic")) quick_links <- c(quick_links, "Plant Analysis")
     if (r == "Admin") quick_links <- c(quick_links, "Admin")
     tagList(
       div(class = "hero-logo",
@@ -818,17 +829,13 @@ server <- function(input, output, session) {
       p(class = "text-muted", style = "text-align:center;", paste0("Logged in as ", r, ". Here's a quick snapshot.")),
       br(),
       fluidRow(
-        column(3, metric_card(n_plant, "Plant Items")),
-        column(3, metric_card(n_active, "Active", colour = "#3E7C59")),
-        column(3, metric_card(n_hire, "On Hire", colour = "#C9A227")),
-        column(3, metric_card(n_due_soon, "MOT/Warranty Due (30 days)", colour = if (n_due_soon > 0) "#9C2B2B" else "#3E7C59"))
+        column(4, metric_card(n_plant, "Plant Items")),
+        column(4, metric_card(n_history, "Total History Entries")),
+        column(4, metric_card(n_invoices_home, "Total Invoices"))
       ),
-      if (r %in% c("Admin", "Kevin")) fluidRow(style = "margin-top:10px;",
-                                               column(3, offset = 6, metric_card(n_ts_due, "Truck Service Due (7 days)", colour = if (n_ts_due > 0) "#9C2B2B" else "#3E7C59")),
-                                               column(3, metric_card(n_invoices_home, "Invoices Logged"))
-      ) else fluidRow(style = "margin-top:10px;",
-                      column(3, offset = 6, metric_card(n_ts_due, "Truck Service Due (7 days)", colour = if (n_ts_due > 0) "#9C2B2B" else "#3E7C59")),
-                      column(3, metric_card(n_gangs, "Gangs"))
+      fluidRow(style = "margin-top:10px;",
+        column(6, metric_card(n_ts_due, "Truck Service Due (14 days)", colour = if (n_ts_due > 0) "#9C2B2B" else "#3E7C59")),
+        column(6, metric_card(n_due_soon, "MOT/Warranty Due (30 days)", colour = if (n_due_soon > 0) "#9C2B2B" else "#3E7C59"))
       ),
       if (n_due_soon > 0) tagList(
         br(),
@@ -837,13 +844,23 @@ server <- function(input, output, session) {
       ),
       if (n_ts_due > 0) tagList(
         br(),
-        h6("Truck Service Due Within 7 Days", style = "text-align:center;"),
+        h6("Truck Service Due Within 14 Days", style = "text-align:center;"),
         div(class = "chart-card", tableOutput("home_truckservice_table"))
       ),
       if (r %in% c("Admin", "Kevin")) tagList(
         br(),
         h6("Invoice Highlights", style = "text-align:center;"),
         div(class = "chart-card", tableOutput("home_invoice_highlights"))
+      ),
+      br(),
+      fluidRow(
+        column(6, h6("Trends")),
+        column(6, style = "text-align:right;",
+               selectInput("home_chart_period", NULL, choices = c("Weekly", "Monthly"), selected = "Weekly", width = "160px"))
+      ),
+      fluidRow(
+        column(6, div(class = "chart-card", h6("History Entries Logged"), plotlyOutput("home_history_trend_plot", height = 260))),
+        if (r %in% c("Admin", "Kevin")) column(6, div(class = "chart-card", h6("Invoice Spend"), plotlyOutput("home_invoice_trend_plot", height = 260)))
       ),
       br(),
       h6("Quick links", style = "text-align:center;"),
@@ -863,11 +880,41 @@ server <- function(input, output, session) {
                     Type = DueType, `Due Date` = as.character(DueDate))
   })
   output$home_truckservice_table <- renderTable({
-    d <- truck_service_due(7)
-    if (nrow(d) == 0) return(data.frame(Message = "Nothing due within 7 days."))
+    d <- truck_service_due(14)
+    if (nrow(d) == 0) return(data.frame(Message = "Nothing due within 14 days."))
     d %>% transmute(Item = ifelse(Machine == "", ItemID, Machine),
                     `PMK/Reg` = ifelse(PMK_Number != "", PMK_Number, Registration),
                     `Last Serviced` = LastServiced, `Due Date` = as.character(DueDate), Status)
+  })
+  # ---- Home page trend charts (weekly/monthly toggle) ----
+  home_period_bucket <- function(dates) {
+    period <- if (!is.null(input$home_chart_period)) input$home_chart_period else "Weekly"
+    if (period == "Monthly") as.Date(format(dates, "%Y-%m-01")) else floor_to_monday(dates)
+  }
+  output$home_history_trend_plot <- renderPlotly({
+    h <- plant_history()
+    if (nrow(h) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
+    h <- h[!is.na(h$DateOnly), ]
+    if (nrow(h) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    h$Bucket <- home_period_bucket(h$DateOnly)
+    agg <- h %>% group_by(Bucket) %>% summarise(Count = n(), .groups = "drop") %>% arrange(Bucket)
+    p <- ggplot(agg, aes(x = Bucket, y = Count, group = 1, text = paste0(Count, " entrie(s)"))) +
+      geom_line(color = "#0B4D3A", linewidth = 1.1) + geom_point(color = "#C9A227", size = 3) +
+      labs(x = NULL, y = NULL) + gg_theme
+    ggplotly(p, tooltip = "text")
+  })
+  output$home_invoice_trend_plot <- renderPlotly({
+    d <- inv()
+    if (nrow(d) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    d <- d[!is.na(d$DateParsed), ]
+    if (nrow(d) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    d$Bucket <- home_period_bucket(d$DateParsed)
+    agg <- d %>% group_by(Bucket) %>% summarise(Total = sum(Amount, na.rm = TRUE), .groups = "drop") %>% arrange(Bucket)
+    p <- ggplot(agg, aes(x = Bucket, y = Total, group = 1, text = paste0("£", round(Total, 2)))) +
+      geom_line(color = "#9C2B2B", linewidth = 1.1) + geom_point(color = "#C9A227", size = 3) +
+      scale_y_continuous(labels = label_dollar(prefix = "£")) + labs(x = NULL, y = NULL) + gg_theme
+    ggplotly(p, tooltip = "text")
   })
   # ---- Invoice highlights (Home page) ----
   # Six quick "most/highest" facts pulled from all invoices logged
@@ -926,7 +973,7 @@ server <- function(input, output, session) {
     data.frame(Highlight = names(rows), Details = unlist(rows, use.names = FALSE), stringsAsFactors = FALSE, row.names = NULL)
   })
   observe({
-    lapply(c("Inventory List", "Plant Whereabouts", "Invoices", "Reports", "Admin"), function(tab_name) {
+    lapply(c("Inventory List", "Plant Whereabouts", "Invoices", "Reports", "Job Cards & Inspections", "Plant Analysis", "Admin"), function(tab_name) {
       input_id <- paste0("goto_", gsub("[^A-Za-z0-9]", "", tab_name))
       observeEvent(input[[input_id]], {
         updateTabsetPanel(session, "main_tabs", selected = tab_name)
@@ -940,6 +987,14 @@ server <- function(input, output, session) {
   output$inventory_tab_content <- renderUI({
     if (inv_view() == "list") inventory_list_ui(role()) else inventory_detail_ui(inv_selected(), role())
   })
+  browse_tile <- function(id, title, count, click_input) {
+    div(class = "browse-tile", role = "button", tabindex = "0",
+        onclick = sprintf("Shiny.setInputValue('%s', '%s', {priority:'event'})", click_input, id),
+        onkeypress = "if(event.key==='Enter'||event.key===' '){this.click()}",
+        div(class = "tile-title", title),
+        div(class = "tile-count", paste0(count, " item(s)"))
+    )
+  }
   inventory_list_ui <- function(r) {
     df <- inventory_data()
     tagList(
@@ -954,9 +1009,55 @@ server <- function(input, output, session) {
                if (r == "Admin") actionButton("add_item_btn", "+ Add New Item", class = "btn-primary btn-sm"))
       ),
       if (nrow(df) == 0) div(class = "alert alert-secondary", "No plant items yet - add some above.")
-      else nested_inventory_accordion("inv_accordion", df, r, show_actions = TRUE, clickable = TRUE)
+      else if (is.null(inv_browse_cat())) {
+        # Level 1: Category tiles
+        tagList(
+          fluidRow(lapply(CATEGORY_OPTIONS, function(cat) {
+            cnt <- nrow(df[df$Category == cat, ])
+            column(3, browse_tile(cat, cat, cnt, "inv_browse_cat_click"))
+          }))
+        )
+      } else if (is.null(inv_browse_sub())) {
+        # Level 2: Sub-Category tiles within the chosen Category
+        cat <- inv_browse_cat()
+        cat_rows <- df[df$Category == cat, ]
+        subs <- subcats_for(cat, df)
+        tagList(
+          actionButton("inv_browse_back_cat", "< Back to Categories", class = "btn-link mb-2"),
+          h5(cat),
+          if (length(subs) == 0) div(class = "alert alert-secondary", "No sub-categories under this category yet.")
+          else fluidRow(lapply(subs, function(sub) {
+            cnt <- nrow(cat_rows[cat_rows$SubCategory == sub, ])
+            column(3, browse_tile(sub, sub, cnt, "inv_browse_sub_click"))
+          }))
+        )
+      } else {
+        # Level 3: item list for the chosen Category > Sub-Category
+        cat <- inv_browse_cat(); sub <- inv_browse_sub()
+        rows <- natural_sort_rows(df[df$Category == cat & df$SubCategory == sub, ])
+        tagList(
+          actionButton("inv_browse_back_sub", "< Back to Sub-Categories", class = "btn-link mb-2"),
+          h5(paste0(cat, " > ", sub)),
+          if (nrow(rows) == 0) div(class = "alert alert-secondary", "No items in this sub-category yet.")
+          else tagList(lapply(seq_len(nrow(rows)), function(i) item_row(rows[i, ], r, clickable = TRUE, show_actions = TRUE)))
+        )
+      }
     )
   }
+  observeEvent(input$inv_browse_cat_click, {
+    inv_browse_cat(input$inv_browse_cat_click)
+    inv_browse_sub(NULL)
+  })
+  observeEvent(input$inv_browse_sub_click, {
+    inv_browse_sub(input$inv_browse_sub_click)
+  })
+  observeEvent(input$inv_browse_back_cat, {
+    inv_browse_cat(NULL)
+    inv_browse_sub(NULL)
+  })
+  observeEvent(input$inv_browse_back_sub, {
+    inv_browse_sub(NULL)
+  })
   observeEvent(input$item_click, {
     inv_selected(input$item_click)
     inv_view("detail")
@@ -1002,7 +1103,7 @@ server <- function(input, output, session) {
                    p(strong("MOT Due: "), ifelse(row$MOTDue == "", "-", row$MOTDue))
             )
           ),
-          p(strong("Active: "), row$Active, " | ", strong("On Hire: "), row$OnHire),
+          p(strong("Active: "), row$Active),
           p(strong("Notes: "), ifelse(row$Notes == "", "-", row$Notes)),
           if (r %in% c("Admin", "Mechanic")) actionButton("inv_add_entry_btn", "+ Add History Entry", class = "btn-primary btn-sm")
       ),
@@ -1066,7 +1167,7 @@ server <- function(input, output, session) {
       conditionalPanel("input.ih_type == 'Mechanic Work'",
                        checkboxInput("ih_subcontractor", "Subcontractor work (creates an Invoice too)", value = FALSE),
                        conditionalPanel("input.ih_subcontractor == true",
-                                        selectizeInput("ih_sub_company", "Subcontractor Company *", choices = COMPANY_LIST,
+                                        selectizeInput("ih_sub_company", "Subcontractor Company *", choices = company_list(),
                                                        options = list(create = TRUE, placeholder = "Select or type a company name")),
                                         numericInput("ih_sub_amount", "Amount (£) *", value = NA)
                        )
@@ -1470,10 +1571,7 @@ server <- function(input, output, session) {
         column(4, textInput("if_warranty", "Warranty End Date", value = g("WarrantyEndDate"), placeholder = "DD/MM/YY")),
         column(4, textInput("if_mot", "MOT Due", value = g("MOTDue"), placeholder = "DD/MM/YY"))
       ),
-      fluidRow(
-        column(6, selectInput("if_active", "Active", choices = c("Yes", "No"), selected = g("Active", "Yes"))),
-        column(6, selectInput("if_onhire", "On Hire", choices = c("Yes", "No"), selected = g("OnHire", "No")))
-      ),
+      selectInput("if_active", "Active", choices = c("Yes", "No"), selected = g("Active", "Yes")),
       selectInput("if_truckservice", "Requires 6-Weekly Truck Service Inspection?",
                   choices = c("No", "Yes"), selected = g("TruckServiceRequired", "No")),
       textAreaInput("if_notes", "Notes", value = g("Notes"), rows = 2)
@@ -1524,7 +1622,7 @@ server <- function(input, output, session) {
       PMK_Number = input$if_pmk, Registration = input$if_reg, SerialNumber = input$if_serial,
       Driver = input$if_driver, Location = input$if_location, Hours = input$if_hours,
       DatePurchased = input$if_datepurch, WarrantyEndDate = input$if_warranty, MOTDue = input$if_mot,
-      Active = input$if_active, OnHire = input$if_onhire, Notes = input$if_notes,
+      Active = input$if_active, Notes = input$if_notes,
       TruckServiceRequired = input$if_truckservice,
       stringsAsFactors = FALSE
     )
@@ -1585,13 +1683,14 @@ server <- function(input, output, session) {
         "Gang sheets persist week to week - edit an existing one instead of recreating it. ",
         "Plant already assigned to a gang won't show up as an option when editing a different one, so double-booking isn't possible."),
       fluidRow(
-        column(8, h5("Gang Sheets")),
-        column(4, style = "text-align:right;",
+        column(6, h5("Gang Sheets")),
+        column(6, style = "text-align:right;",
+               downloadButton("gang_sheets_download", "Download (CSV)", class = "btn-outline-secondary btn-sm me-2"),
                if (r == "Admin") actionButton("new_gang_sheet_btn", "+ Create New Gang Sheet", class = "btn-primary btn-sm"))
       ),
       if (length(gang_list()) == 0) div(class = "alert alert-secondary", "No gang sheets yet.")
       else {
-        gang_panels <- lapply(gang_list(), function(g) {
+        gang_panel_for <- function(g) {
           g_rows <- df[df$Gang == g, ]
           meta_row <- gang_meta()[gang_meta()$Gang == g, ]
           ganger_nm <- if (nrow(meta_row) > 0) meta_row$Ganger[1] else ""
@@ -1615,8 +1714,27 @@ server <- function(input, output, session) {
             if (nrow(g_rows) == 0) p(class = "text-muted mb-0", "No plant assigned.")
             else tagList(lapply(seq_len(nrow(g_rows)), function(i) item_row(g_rows[i, ], r, clickable = FALSE, show_actions = TRUE)))
           )
-        })
-        do.call(accordion, c(list(id = "gang_sheets_accordion", open = FALSE), gang_panels))
+        }
+        # Group gang sheets by Location, so crews on the same site sit
+        # together rather than one long undifferentiated list -
+        # gangs with no Location set fall into their own bucket at
+        # the end rather than being hidden.
+        gm <- gang_meta()
+        loc_of <- setNames(vapply(gang_list(), function(g) {
+          row <- gm[gm$Gang == g, ]
+          loc <- if (nrow(row) > 0) row$Location[1] else ""
+          if (is.na(loc) || trimws(loc) == "") "No Location Set" else trimws(loc)
+        }, character(1)), gang_list())
+        all_locs <- unique(unname(loc_of))
+        all_locs <- c(sort(setdiff(all_locs, "No Location Set")), intersect(all_locs, "No Location Set"))
+        tagList(lapply(all_locs, function(loc) {
+          gangs_here <- names(loc_of)[loc_of == loc]
+          tagList(
+            h6(loc, style = "margin-top:16px; color:#5B6770; text-transform:uppercase; letter-spacing:0.5px; font-size:0.85rem;"),
+            do.call(accordion, c(list(id = paste0("gang_sheets_accordion_", make.names(loc)), open = FALSE),
+                                  lapply(gangs_here, gang_panel_for)))
+          )
+        }))
       },
       br(),
       h5("Unassigned Plant"),
@@ -1628,6 +1746,32 @@ server <- function(input, output, session) {
       }
     )
   }
+  gang_sheet_export_data <- reactive({
+    df <- inventory_data()
+    gm <- gang_meta()
+    gl <- gang_list()
+    if (length(gl) == 0) return(data.frame(Message = "No gang sheets yet."))
+    rows <- lapply(gl, function(g) {
+      g_rows <- df[df$Gang == g, ]
+      meta_row <- gm[gm$Gang == g, ]
+      ganger_nm <- if (nrow(meta_row) > 0) meta_row$Ganger[1] else ""
+      loc_nm <- if (nrow(meta_row) > 0) meta_row$Location[1] else ""
+      if (nrow(g_rows) == 0) {
+        data.frame(Gang = g, Ganger = ganger_nm, Location = loc_nm, Item = "", Category = "", SubCategory = "",
+                   Driver = "", stringsAsFactors = FALSE)
+      } else {
+        data.frame(Gang = g, Ganger = ganger_nm, Location = loc_nm,
+                   Item = vapply(seq_len(nrow(g_rows)), function(i) item_identifier(g_rows[i, ]), character(1)),
+                   Category = g_rows$Category, SubCategory = g_rows$SubCategory, Driver = g_rows$Driver,
+                   stringsAsFactors = FALSE)
+      }
+    })
+    do.call(rbind, rows)
+  })
+  output$gang_sheets_download <- downloadHandler(
+    filename = function() paste0("pmk_gang_sheets_", Sys.Date(), ".csv"),
+    content = function(file) write.csv(gang_sheet_export_data(), file, row.names = FALSE)
+  )
   gang_sheet_form <- function(pool_df, selected_ids = character(0)) {
     lapply(CATEGORY_OPTIONS, function(cat) {
       cat_rows <- pool_df[pool_df$Category == cat, ]
@@ -1795,7 +1939,8 @@ server <- function(input, output, session) {
         type = "pills",
         tabPanel("Overview", overview_ui()),
         tabPanel("Companies", companies_ui()),
-        tabPanel("All Invoices", all_invoices_ui())
+        tabPanel("All Invoices", all_invoices_ui()),
+        tabPanel("Invoice Analysis", invoice_analysis_ui())
       )
     )
   }
@@ -1871,7 +2016,7 @@ server <- function(input, output, session) {
     init_items <- if (init_sub != "") items_for_picker(init_cat, init_sub, inventory_data()) else character(0)
     init_ref <- g("Reference_PMK_Number")
     if (init_ref != "" && !(init_ref %in% init_items)) init_items <- c(init_items, init_ref)
-    company_choices <- COMPANY_LIST
+    company_choices <- company_list()
     init_company <- g("Company")
     if (init_company != "" && !(init_company %in% company_choices)) company_choices <- c(company_choices, init_company)
     init_amount <- if (is.null(prefill)) NA else suppressWarnings(as.numeric(prefill[["Amount"]]))
@@ -2093,8 +2238,7 @@ server <- function(input, output, session) {
       tabsetPanel(
         type = "pills",
         tabPanel("Weekly Report", weekly_report_ui()),
-        tabPanel("Monthly Report", monthly_report_ui()),
-        tabPanel("Invoice Analysis", invoice_analysis_ui())
+        tabPanel("Monthly Report", monthly_report_ui())
       )
     )
   }
@@ -2135,6 +2279,10 @@ server <- function(input, output, session) {
                column(3, offset = 9, metric_card(textOutput("wr_ts_due_count", inline = TRUE), "Truck Service Due (7 days)", colour = "#9C2B2B"))
       ),
       br(),
+      fluidRow(
+        column(6, div(class = "chart-card", h6("Invoices by Category This Week"), tableOutput("wr_invoice_category_table"))),
+        column(6, div(class = "chart-card", h6("History Entries by Category This Week"), tableOutput("wr_history_category_table")))
+      ),
       div(class = "chart-card", h6("Invoices Logged This Week"), tableOutput("wr_invoices_table")),
       div(class = "chart-card", h6("History Entries This Week"), tableOutput("wr_history_table")),
       div(class = "chart-card", h6("Due for MOT or Warranty Within 7 Days"), tableOutput("wr_due_table")),
@@ -2168,6 +2316,10 @@ server <- function(input, output, session) {
       ),
       br(),
       div(class = "chart-card", h6("Daily Spend This Month"), plotlyOutput("mr_trend_plot", height = 280)),
+      fluidRow(
+        column(6, div(class = "chart-card", h6("Invoices by Category This Month"), tableOutput("mr_invoice_category_table"))),
+        column(6, div(class = "chart-card", h6("History Entries by Category This Month"), tableOutput("mr_history_category_table")))
+      ),
       div(class = "chart-card", h6("Top Companies This Month"), tableOutput("mr_company_table")),
       div(class = "chart-card", h6("Fleet Summary by Category"), tableOutput("mr_fleet_table")),
       div(class = "chart-card", h6("History Entries This Month"), tableOutput("mr_history_table")),
@@ -2210,6 +2362,20 @@ server <- function(input, output, session) {
     d <- wr_history()
     if (nrow(d) == 0) return(data.frame(Message = "No history entries this week."))
     d %>% transmute(Item = ItemID, `Date/Time` = DateTime, Type = EntryType, Description, `Recorded By` = RecordedBy)
+  })
+  output$wr_invoice_category_table <- renderTable({
+    d <- wr_invoices()
+    if (nrow(d) == 0) return(data.frame(Message = "No invoices logged this week."))
+    d %>% group_by(Category) %>% summarise(Invoices = n(), `Total (£)` = sprintf("%.2f", sum(Amount, na.rm = TRUE))) %>%
+      arrange(desc(Invoices))
+  })
+  output$wr_history_category_table <- renderTable({
+    h <- wr_history()
+    if (nrow(h) == 0) return(data.frame(Message = "No history entries this week."))
+    df_inv <- inventory_data()
+    h$Category <- df_inv$Category[match(h$ItemID, df_inv$ItemID)]
+    h$Category[is.na(h$Category) | h$Category == ""] <- "Unknown"
+    h %>% group_by(Category) %>% summarise(Entries = n()) %>% arrange(desc(Entries))
   })
   output$wr_due_table <- renderTable({
     d <- wr_due()
@@ -2363,7 +2529,21 @@ server <- function(input, output, session) {
   output$mr_fleet_table <- renderTable({
     df <- inventory_data()
     df %>% group_by(Category) %>%
-      summarise(Total = n(), Active = sum(Active == "Yes"), Inactive = sum(Active == "No"), `On Hire` = sum(OnHire == "Yes"))
+      summarise(Total = n(), Active = sum(Active == "Yes"), Inactive = sum(Active == "No"))
+  })
+  output$mr_invoice_category_table <- renderTable({
+    d <- mr_invoices()
+    if (nrow(d) == 0) return(data.frame(Message = "No invoices logged this month."))
+    d %>% group_by(Category) %>% summarise(Invoices = n(), `Total (£)` = sprintf("%.2f", sum(Amount, na.rm = TRUE))) %>%
+      arrange(desc(Invoices))
+  })
+  output$mr_history_category_table <- renderTable({
+    h <- mr_history()
+    if (nrow(h) == 0) return(data.frame(Message = "No history entries this month."))
+    df_inv <- inventory_data()
+    h$Category <- df_inv$Category[match(h$ItemID, df_inv$ItemID)]
+    h$Category[is.na(h$Category) | h$Category == ""] <- "Unknown"
+    h %>% group_by(Category) %>% summarise(Entries = n()) %>% arrange(desc(Entries))
   })
   output$mr_history_table <- renderTable({
     d <- mr_history()
@@ -2400,13 +2580,19 @@ server <- function(input, output, session) {
       br(),
       p(class = "text-muted",
         "Green = Service Inspection, yellow = Job Card, pink = Mechanic Work, logged that week - split square = more than one. Last 52 weeks. ",
-        "Filter by Category/Sub-Category to keep the list manageable, or download the full log below."),
+        "Shown grouped by Category/Sub-Category by default - pick a Category (and optionally Sub-Category) to narrow it down, or download the full log below."),
       fluidRow(
         column(4, selectInput("jg_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
         column(4, selectizeInput("jg_subcategory", "Sub-Category", choices = "All", selected = "All")),
         column(4, div(style = "margin-top:24px;", downloadButton("jg_download", "Download (CSV)", class = "btn-primary btn-sm")))
       ),
-      div(class = "chart-card", style = "overflow-x:auto;", uiOutput("jg_grid"))
+      div(class = "chart-card", style = "overflow-x:auto;", uiOutput("jg_grid")),
+      div(style = "display:flex; gap:16px; margin-top:6px; font-size:11px; color:#666; flex-wrap:wrap;",
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3E7C59;border-radius:2px;display:inline-block;"), "Service Inspection"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D9A400;border-radius:2px;display:inline-block;"), "Job Card"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D6598E;border-radius:2px;display:inline-block;"), "Mechanic Work"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#E2E2E2;border-radius:2px;display:inline-block;"), "Nothing logged")
+      )
     )
   }
   observeEvent(input$jg_category, {
@@ -2450,11 +2636,11 @@ server <- function(input, output, session) {
     }, character(1))
     paste0("linear-gradient(135deg,", paste(stops, collapse = ","), ")")
   }
-  output$jg_grid <- renderUI({
-    items <- jg_filtered_items()
-    if (nrow(items) == 0) return(div(class = "alert alert-secondary", "No items match this filter."))
-    weeks <- jg_weeks()
-    ev <- jg_events()
+  # Builds just the week-header row + one row per item (no legend -
+  # that's shown once, statically, below the whole grid) - shared by
+  # both the flat filtered view and each Sub-Category panel in the
+  # default grouped view.
+  jg_grid_rows_ui <- function(items, weeks, ev) {
     n_weeks <- length(weeks)
     header_cells <- lapply(seq_len(n_weeks), function(i) {
       lbl <- if (i %% 4 == 1) format(weeks[i], "%d %b") else ""
@@ -2482,14 +2668,41 @@ server <- function(input, output, session) {
           div(style = "width:100px; flex-shrink:0;"),
           div(style = "display:flex; gap:3px;", header_cells)
       ),
-      row_divs,
-      div(style = "display:flex; gap:16px; margin-top:10px; font-size:11px; color:#666; flex-wrap:wrap;",
-          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3E7C59;border-radius:2px;display:inline-block;"), "Service Inspection"),
-          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D9A400;border-radius:2px;display:inline-block;"), "Job Card"),
-          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D6598E;border-radius:2px;display:inline-block;"), "Mechanic Work"),
-          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#E2E2E2;border-radius:2px;display:inline-block;"), "Nothing logged")
-      )
+      row_divs
     )
+  }
+  output$jg_grid <- renderUI({
+    weeks <- jg_weeks()
+    ev <- jg_events()
+    cat_sel <- if (!is.null(input$jg_category)) input$jg_category else "All"
+    if (cat_sel == "All") {
+      # Default view: grouped by Category > Sub-Category, same
+      # drill-down pattern as Inventory List / gang sheet forms.
+      df <- inventory_data()
+      if (nrow(df) == 0) return(div(class = "alert alert-secondary", "No plant items yet."))
+      cat_panels <- lapply(CATEGORY_OPTIONS, function(cat) {
+        cat_rows <- df[df$Category == cat, ]
+        subs <- subcats_for(cat, df)
+        sub_panels <- lapply(subs, function(sub) {
+          sub_rows <- natural_sort_rows(cat_rows[cat_rows$SubCategory == sub, ])
+          accordion_panel(
+            title = paste0(sub, " (", nrow(sub_rows), ")"), value = paste0(cat, "___", sub),
+            if (nrow(sub_rows) == 0) p(class = "text-muted mb-0", "None.")
+            else jg_grid_rows_ui(sub_rows, weeks, ev)
+          )
+        })
+        accordion_panel(
+          title = paste0(cat, " (", nrow(cat_rows), ")"), value = cat,
+          if (length(sub_panels) == 0) p(class = "text-muted mb-0", "None in this category.")
+          else do.call(accordion, c(list(id = paste0("jg_cat_accordion_", make.names(cat))), sub_panels))
+        )
+      })
+      do.call(accordion, c(list(id = "jg_top_accordion", open = FALSE), cat_panels))
+    } else {
+      items <- jg_filtered_items()
+      if (nrow(items) == 0) return(div(class = "alert alert-secondary", "No items match this filter."))
+      jg_grid_rows_ui(items, weeks, ev)
+    }
   })
   jg_download_data <- reactive({
     items <- jg_filtered_items()
@@ -2507,6 +2720,78 @@ server <- function(input, output, session) {
     filename = function() paste0("pmk_jobcards_inspections_", Sys.Date(), ".csv"),
     content = function(file) write.csv(jg_download_data(), file, row.names = FALSE)
   )
+  # -------------------------------------------------------------
+  # PLANT ANALYSIS - ranks plant by activity: which items get logged
+  # against most, and which need the most Job Cards. Admin/Mechanic
+  # only, same access as Job Cards & Inspections.
+  # -------------------------------------------------------------
+  output$plant_analysis_tab_content <- renderUI({ plant_analysis_ui(role()) })
+  plant_analysis_ui <- function(r) {
+    tagList(
+      br(),
+      p(class = "text-muted", "Ranks plant by activity - which items get logged against most, and which need the most Job Cards."),
+      fluidRow(
+        column(6, NULL),
+        column(6, style = "text-align:right;",
+               selectInput("pa_period", NULL, choices = c("Last 6 Weeks", "Last 6 Months"), selected = "Last 6 Weeks", width = "200px"))
+      ),
+      fluidRow(
+        column(6, div(class = "chart-card", h6("Most Frequent History Entries"), plotlyOutput("pa_history_plot", height = 340))),
+        column(6, div(class = "chart-card", h6("Most Job Cards"), plotlyOutput("pa_jobcard_plot", height = 340)))
+      )
+    )
+  }
+  pa_period_start <- reactive({
+    period <- if (!is.null(input$pa_period)) input$pa_period else "Last 6 Weeks"
+    if (period == "Last 6 Months") Sys.Date() - 182 else Sys.Date() - 41
+  })
+  pa_history <- reactive({
+    h <- plant_history()
+    if (nrow(h) == 0) return(h)
+    h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
+    h[!is.na(h$DateOnly) & h$DateOnly >= pa_period_start(), ]
+  })
+  pa_label_for_item <- function(iid, df_inv) {
+    row <- df_inv[df_inv$ItemID == iid, ]
+    if (nrow(row) == 0) return(iid)
+    id <- item_identifier(row[1, ])
+    if (row$Machine[1] != "") paste0(id, " - ", row$Machine[1]) else id
+  }
+  pa_all_agg <- reactive({
+    h <- pa_history()
+    empty <- data.frame(ItemID = character(0), Label = character(0), Count = integer(0), stringsAsFactors = FALSE)
+    if (nrow(h) == 0) return(empty)
+    df_inv <- inventory_data()
+    agg <- h %>% group_by(ItemID) %>% summarise(Count = n(), .groups = "drop") %>% arrange(desc(Count))
+    agg$Label <- vapply(agg$ItemID, pa_label_for_item, character(1), df_inv = df_inv)
+    agg
+  })
+  pa_jobcard_agg <- reactive({
+    h <- pa_history()
+    h <- if (nrow(h) == 0) h else h[h$EntryType == "Job Card", ]
+    empty <- data.frame(ItemID = character(0), Label = character(0), Count = integer(0), stringsAsFactors = FALSE)
+    if (nrow(h) == 0) return(empty)
+    df_inv <- inventory_data()
+    agg <- h %>% group_by(ItemID) %>% summarise(Count = n(), .groups = "drop") %>% arrange(desc(Count))
+    agg$Label <- vapply(agg$ItemID, pa_label_for_item, character(1), df_inv = df_inv)
+    agg
+  })
+  output$pa_history_plot <- renderPlotly({
+    a <- pa_all_agg()
+    if (nrow(a) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    top <- head(a, 10)
+    p <- ggplot(top, aes(x = reorder(Label, Count), y = Count, text = paste0(Count, " entrie(s)"))) +
+      geom_col(fill = "#0B4D3A") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
+    ggplotly(p, tooltip = "text")
+  })
+  output$pa_jobcard_plot <- renderPlotly({
+    a <- pa_jobcard_agg()
+    if (nrow(a) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
+    top <- head(a, 10)
+    p <- ggplot(top, aes(x = reorder(Label, Count), y = Count, text = paste0(Count, " job card(s)"))) +
+      geom_col(fill = "#D9A400") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
+    ggplotly(p, tooltip = "text")
+  })
   # -------------------------------------------------------------
   # ADMIN - control panel, not an edit surface. All data edits stay
   # inline where the data lives (Inventory List, Whereabouts,
@@ -2550,9 +2835,21 @@ server <- function(input, output, session) {
           tableOutput("admin_staff_activity_table")
       ),
       div(class = "admin-card",
-          h5("Supplier List (Invoice Company dropdown)"),
-          p(class = "text-muted", "Edit the COMPANY_LIST vector near the top of app.R to add or remove suppliers."),
-          div(paste(COMPANY_LIST, collapse = ", "))
+          h5("Company List (Invoice Company dropdown)"),
+          p(class = "text-muted", "Suppliers/garages available in the Company dropdown when adding an invoice or logging subcontractor mechanic work."),
+          fluidRow(
+            column(8, textInput("admin_company_new", NULL, placeholder = "e.g. Arnold Clark")),
+            column(4, actionButton("admin_company_add", "+ Add", class = "btn-primary btn-sm"))
+          ),
+          if (length(company_list()) == 0) p(class = "text-muted mb-0", "No companies added yet.")
+          else tagList(lapply(company_list(), function(nm) {
+            div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
+                span(nm),
+                tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
+                       onclick = sprintf("Shiny.setInputValue('delete_company_click', '%s', {priority:'event'}); return false;", nm),
+                       "Delete")
+            )
+          }))
       ),
       div(class = "admin-card",
           h5("Ganger List"),
@@ -2629,6 +2926,19 @@ server <- function(input, output, session) {
     nm <- input$delete_ganger_click
     ganger_list(setdiff(ganger_list(), nm))
     showNotification(paste0("'", nm, "' removed from the Ganger list."), type = "message")
+  })
+  observeEvent(input$admin_company_add, {
+    nm <- trimws(input$admin_company_new)
+    req(nm, nm != "")
+    if (nm %in% company_list()) { showNotification("That company is already on the list.", type = "error"); return() }
+    company_list(sort(c(company_list(), nm)))
+    updateTextInput(session, "admin_company_new", value = "")
+    showNotification(paste0("Added '", nm, "' to the Company list."), type = "message")
+  })
+  observeEvent(input$delete_company_click, {
+    nm <- input$delete_company_click
+    company_list(setdiff(company_list(), nm))
+    showNotification(paste0("'", nm, "' removed from the Company list."), type = "message")
   })
 }
 shinyApp(ui, server)
