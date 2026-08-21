@@ -634,6 +634,24 @@ server <- function(input, output, session) {
   editing_invoice <- reactiveVal(NULL)
   editing_history_entry <- reactiveVal(NULL)
   inv <- reactive({ invoices_data() %>% mutate(DateParsed = as.Date(Date)) })
+  # Filtered view used only by the Invoices tab's Overview/Analysis/
+  # Companies/All Invoices sub-tabs (shared date + company + plant
+  # item filter bar at the top of that tab). Home page trends and the
+  # Weekly/Monthly Reports keep using the unfiltered inv() - they
+  # already have their own date scoping.
+  inv_filtered <- reactive({
+    d <- inv()
+    if (!is.null(input$inv_filter_dates) && length(input$inv_filter_dates) == 2 && !anyNA(input$inv_filter_dates)) {
+      d <- d[!is.na(d$DateParsed) & d$DateParsed >= input$inv_filter_dates[1] & d$DateParsed <= input$inv_filter_dates[2], ]
+    }
+    if (!is.null(input$inv_filter_company) && length(input$inv_filter_company) > 0) {
+      d <- d[d$Company %in% input$inv_filter_company, ]
+    }
+    if (!is.null(input$inv_filter_item) && length(input$inv_filter_item) > 0) {
+      d <- d[d$Reference_PMK_Number %in% input$inv_filter_item, ]
+    }
+    d
+  })
   # ---- Google Sheets sync ----
   # One-way, app -> Sheet. Debounced so a burst of edits (e.g.
   # ticking 10 gang checkboxes) becomes one write, not ten.
@@ -819,12 +837,9 @@ server <- function(input, output, session) {
     r <- role()
     tabs <- list()
     tabs[["Home"]] <- uiOutput("home_tab_content")
-    tabs[["Inventory List"]] <- uiOutput("inventory_tab_content")
-    if (r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) tabs[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
+    tabs[["Plant"]] <- uiOutput("plant_tab_content")
     if (r %in% c("Admin", "Boss", "Kevin")) tabs[["Invoices"]] <- uiOutput("invoices_tab_content")
-    if (r %in% c("Admin", "Boss", "Kevin")) tabs[["Reports"]] <- uiOutput("reports_tab_content")
     if (r %in% c("Admin", "Boss", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
-    if (r %in% c("Admin", "Boss", "Mechanic")) tabs[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
     if (r %in% c("Admin", "Boss", "Plantman")) tabs[["Admin"]] <- uiOutput("admin_tab_content")
     if (r %in% c("Admin", "Boss")) tabs[["Notifications"]] <- uiOutput("notifications_tab_content")
     do.call(tabsetPanel, c(
@@ -832,6 +847,24 @@ server <- function(input, output, session) {
       lapply(names(tabs), function(nm) tabPanel(nm, tabs[[nm]])),
       list(type = "tabs")
     ))
+  })
+  # ---- Plant tab - houses Inventory List, Plant Whereabouts and
+  # Plant Analysis as sub-tabs. Built once per role() change, same
+  # "stable outer dependency" pattern as main_ui - each sub-tab's own
+  # narrow uiOutput still updates live underneath it.
+  output$plant_tab_content <- renderUI({
+    r <- role()
+    sub <- list()
+    sub[["Inventory List"]] <- uiOutput("inventory_tab_content")
+    if (r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) sub[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
+    if (r %in% c("Admin", "Boss", "Mechanic")) sub[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
+    tagList(
+      br(),
+      do.call(tabsetPanel, c(
+        list(type = "pills"),
+        lapply(names(sub), function(nm) tabPanel(nm, sub[[nm]]))
+      ))
+    )
   })
   # -------------------------------------------------------------
   # HOME PAGE - big centred logo, snapshot, quick links
@@ -2161,6 +2194,37 @@ server <- function(input, output, session) {
   # -------------------------------------------------------------
   output$invoices_tab_content <- renderUI({ invoices_ui(role()) })
   invoices_ui <- function(r) {
+    all_dates <- suppressWarnings(as.Date(invoices_data()$Date))
+    all_dates <- all_dates[!is.na(all_dates)]
+    date_min <- if (length(all_dates) > 0) min(all_dates) else Sys.Date() - 365
+    date_max <- if (length(all_dates) > 0) max(all_dates) else Sys.Date()
+    # Named so the dropdown can show "PMK 107 - Excavator > Small
+    # Excavator" (category/sub-category greyed out via the render JS
+    # below) while the filter itself still matches on just the
+    # reference number.
+    inv_items_df <- unique(invoices_data()[invoices_data()$Reference_PMK_Number != "",
+                                            c("Reference_PMK_Number", "Category", "SubCategory")])
+    inv_items_df <- inv_items_df[order(inv_items_df$Reference_PMK_Number), ]
+    item_choices <- setNames(
+      inv_items_df$Reference_PMK_Number,
+      paste0(inv_items_df$Reference_PMK_Number, " - ", inv_items_df$Category, " > ", inv_items_df$SubCategory)
+    )
+    item_render_js <- I("{
+      option: function(item, escape) {
+        var parts = item.label.split(' - ');
+        var main = escape(parts.shift());
+        var rest = parts.join(' - ');
+        var sub = rest ? '<span style=\"color:#9a9a9a;font-size:0.85em;\"> - ' + escape(rest) + '</span>' : '';
+        return '<div>' + main + sub + '</div>';
+      },
+      item: function(item, escape) {
+        var parts = item.label.split(' - ');
+        var main = escape(parts.shift());
+        var rest = parts.join(' - ');
+        var sub = rest ? '<span style=\"color:#9a9a9a;font-size:0.85em;\"> - ' + escape(rest) + '</span>' : '';
+        return '<div>' + main + sub + '</div>';
+      }
+    }")
     tagList(
       br(),
       p(class = "text-muted", if (r %in% c("Admin", "Boss")) "Add and view invoices." else "View access - Kevin's role."),
@@ -2169,12 +2233,22 @@ server <- function(input, output, session) {
         column(4, style = "text-align:right;",
                if (r %in% c("Admin", "Boss")) actionButton("add_invoice_btn", "+ Add Invoice", class = "btn-primary btn-sm"))
       ),
+      div(class = "chart-card",
+          p(class = "text-muted mb-2", "Filters below apply to Overview, Analysis, Companies and All Invoices."),
+          fluidRow(
+            column(4, dateRangeInput("inv_filter_dates", "Date range", start = date_min, end = date_max)),
+            column(4, selectizeInput("inv_filter_company", "Company", choices = company_list(), multiple = TRUE,
+                                     options = list(placeholder = "All companies"))),
+            column(4, selectizeInput("inv_filter_item", "Plant Item", choices = item_choices, multiple = TRUE,
+                                     options = list(placeholder = "All items", render = item_render_js)))
+          )
+      ),
       tabsetPanel(
         type = "pills",
         tabPanel("Overview", overview_ui()),
+        tabPanel("Analysis", invoice_analysis_ui()),
         tabPanel("Companies", companies_ui()),
-        tabPanel("All Invoices", all_invoices_ui()),
-        tabPanel("Invoice Analysis", invoice_analysis_ui())
+        tabPanel("All Invoices", all_invoices_ui())
       )
     )
   }
@@ -2233,8 +2307,8 @@ server <- function(input, output, session) {
     )
   }
   output$invoice_cards <- renderUI({
-    df <- invoices_data()
-    if (nrow(df) == 0) return(div(class = "alert alert-secondary", "No invoices logged yet."))
+    df <- inv_filtered()
+    if (nrow(df) == 0) return(div(class = "alert alert-secondary", "No invoices logged yet, or none match the current filters."))
     df <- df %>% arrange(desc(as.Date(Date)))
     r <- role()
     tagList(lapply(seq_len(nrow(df)), function(i) invoice_card(df[i, ], r)))
@@ -2413,14 +2487,14 @@ server <- function(input, output, session) {
     showNotification("Invoice deleted.", type = "message")
   })
   gg_theme <- theme_minimal(base_family = "sans") + theme(text = element_text(color = "#12241C"), panel.grid.minor = element_blank())
-  output$total_spend_val <- renderText({ dollar(sum(inv()$Amount, na.rm = TRUE), prefix = "£") })
-  output$n_invoices_val <- renderText({ nrow(inv()) })
+  output$total_spend_val <- renderText({ dollar(sum(inv_filtered()$Amount, na.rm = TRUE), prefix = "£") })
+  output$n_invoices_val <- renderText({ nrow(inv_filtered()) })
   output$avg_invoice_val <- renderText({
-    d <- inv()
+    d <- inv_filtered()
     if (nrow(d) == 0) "£0.00" else dollar(mean(d$Amount, na.rm = TRUE), prefix = "£")
   })
   output$monthly_trend_plot <- renderPlotly({
-    d <- inv()
+    d <- inv_filtered()
     if (nrow(d) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
     monthly <- d %>% mutate(YearMonth = format(DateParsed, "%Y-%m")) %>%
       group_by(YearMonth) %>% summarise(Total = sum(Amount, na.rm = TRUE)) %>% arrange(YearMonth)
@@ -2431,7 +2505,7 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text")
   })
   output$top_companies_plot <- renderPlotly({
-    d <- inv()
+    d <- inv_filtered()
     if (nrow(d) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
     c_data <- d %>% group_by(Company) %>% summarise(Total = sum(Amount, na.rm = TRUE)) %>% arrange(desc(Total)) %>% head(10)
     p <- ggplot(c_data, aes(x = reorder(Company, Total), y = Total, text = paste0("£", round(Total, 2)))) +
@@ -2440,7 +2514,7 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text")
   })
   output$company_plot <- renderPlotly({
-    d <- inv()
+    d <- inv_filtered()
     if (nrow(d) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
     c_data <- d %>% group_by(Company) %>% summarise(Total = sum(Amount, na.rm = TRUE)) %>% arrange(desc(Total))
     p <- ggplot(c_data, aes(x = reorder(Company, Total), y = Total, text = paste0("£", round(Total, 2)))) +
@@ -2449,8 +2523,8 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text")
   })
   output$company_table <- renderTable({
-    d <- inv()
-    if (nrow(d) == 0) return(data.frame(Message = "No invoices logged yet."))
+    d <- inv_filtered()
+    if (nrow(d) == 0) return(data.frame(Message = "No invoices logged yet, or none match the current filters."))
     d %>% group_by(Company) %>%
       summarise(`Total Spend (£)` = sprintf("%.2f", sum(Amount, na.rm = TRUE)),
                 `Invoices` = n(), `Avg Invoice (£)` = sprintf("%.2f", mean(Amount, na.rm = TRUE))) %>%
@@ -2458,13 +2532,15 @@ server <- function(input, output, session) {
   })
   output$download_all_csv <- downloadHandler(
     filename = function() paste0("pmk_invoices_", Sys.Date(), ".csv"),
-    content = function(file) write.csv(invoices_data(), file, row.names = FALSE)
+    content = function(file) write.csv(inv_filtered(), file, row.names = FALSE)
   )
   # -------------------------------------------------------------
   # REPORTS - Weekly and Monthly snapshots pulled from Inventory
   # and Invoices. Admin/Kevin only, same access as Invoices.
   # -------------------------------------------------------------
-  output$reports_tab_content <- renderUI({ reports_ui(role()) })
+  # Reports now lives inside the Admin tab (as its own accordion
+  # panel) rather than as a standalone top-level tab - reports_ui()
+  # is called directly from admin_tab_content further down.
   reports_ui <- function(r) {
     tagList(
       br(),
@@ -2644,7 +2720,7 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   invoice_item_agg <- reactive({
-    d <- inv()
+    d <- inv_filtered()
     if (!is.null(input$ia_category) && input$ia_category != "All") d <- d[d$Category == input$ia_category, ]
     if (!is.null(input$ia_subcategory) && input$ia_subcategory != "All") d <- d[d$SubCategory == input$ia_subcategory, ]
     empty <- data.frame(MatchedID = character(0), Label = character(0), Category = character(0),
@@ -3089,6 +3165,9 @@ server <- function(input, output, session) {
           ),
           uiOutput("admin_ganger_list_ui")
       )
+    )
+    if (r %in% c("Admin", "Boss")) panels[["Reports"]] <- accordion_panel("Reports", value = "Reports",
+      div(class = "admin-card", reports_ui(r))
     )
     tagList(
       br(),
