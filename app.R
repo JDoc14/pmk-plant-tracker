@@ -2797,78 +2797,102 @@ server <- function(input, output, session) {
   # inline where the data lives (Inventory List, Whereabouts,
   # Invoices); this tab is just Google Sheets sync status.
   # -------------------------------------------------------------
+  # Built ONCE (no reactive() calls inline) so the accordion shell and
+  # the textInputs inside it never get torn down and recreated by
+  # background reactivity (e.g. a Sheets sync finishing in another
+  # tab). Each card's changeable content lives in its own narrow
+  # uiOutput/tableOutput below, so only that piece re-renders - typing
+  # into "Add a company/ganger" can never get wiped out mid-type, and
+  # the accordion's open/closed state stays put.
   output$admin_tab_content <- renderUI({
     tagList(
       br(),
-      div(class = "admin-card",
-          h5("Google Sheets Sync"),
-          p(class = "text-muted",
-            if (SHEETS_SYNC_ENABLED)
-              "The app is the only place data gets edited. Every change here pushes out to the Google Sheet automatically - the Sheet is a live read-only mirror, not an input."
-            else
-              "Sync is currently turned off (SHEETS_SYNC_ENABLED is FALSE in app.R). See the setup notes at the top of app.R to turn it on."
-          ),
-          fluidRow(
-            column(4, metric_card(if (SHEETS_SYNC_ENABLED) "On" else "Off", "Sync Status",
-                                  colour = if (SHEETS_SYNC_ENABLED) "#3E7C59" else "#5B6770")),
-            column(4, metric_card(textOutput("admin_last_synced", inline = TRUE), "Last Synced")),
-            column(4, div(style = "padding-top:14px;", actionButton("admin_sync_now", "Sync Now", class = "btn-primary btn-sm")))
-          ),
-          if (!is.null(sheets_last_error())) div(class = "alert alert-danger mt-3", sheets_last_error())
-      ),
-      div(class = "admin-card",
-          h5("Machines With No Driver"),
-          p(class = "text-muted", "Active plant with nobody currently assigned - worth double-checking these."),
-          {
-            df <- inventory_data()
-            unassigned <- df[df$Active == "Yes" & (is.na(df$Driver) | df$Driver == ""), ]
-            if (nrow(unassigned) == 0) div(class = "alert alert-secondary mb-0", "Every active item has a driver assigned.")
-            else tagList(
-              div(class = "alert alert-warning", paste0(nrow(unassigned), " active item(s) with no driver.")),
-              tableOutput("admin_no_driver_table")
-            )
-          }
-      ),
-      div(class = "admin-card",
-          h5("Staff Activity (This Week)"),
-          p(class = "text-muted", "Quick count of History entries and Invoices logged by each person this week. For a specific week/month or person, use the 'Report by input' filter on the Reports tab."),
-          tableOutput("admin_staff_activity_table")
-      ),
-      div(class = "admin-card",
-          h5("Company List (Invoice Company dropdown)"),
-          p(class = "text-muted", "Suppliers/garages available in the Company dropdown when adding an invoice or logging subcontractor mechanic work."),
-          fluidRow(
-            column(8, textInput("admin_company_new", NULL, placeholder = "e.g. Arnold Clark")),
-            column(4, actionButton("admin_company_add", "+ Add", class = "btn-primary btn-sm"))
-          ),
-          if (length(company_list()) == 0) p(class = "text-muted mb-0", "No companies added yet.")
-          else tagList(lapply(company_list(), function(nm) {
-            div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
-                span(nm),
-                tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
-                       onclick = sprintf("Shiny.setInputValue('delete_company_click', '%s', {priority:'event'}); return false;", nm),
-                       "Delete")
-            )
-          }))
-      ),
-      div(class = "admin-card",
-          h5("Ganger List"),
-          p(class = "text-muted", "Names available in the Ganger dropdown when creating or editing a gang sheet."),
-          fluidRow(
-            column(8, textInput("admin_ganger_new", NULL, placeholder = "e.g. John Smith")),
-            column(4, actionButton("admin_ganger_add", "+ Add", class = "btn-primary btn-sm"))
-          ),
-          if (length(ganger_list()) == 0) p(class = "text-muted mb-0", "No gangers added yet.")
-          else tagList(lapply(ganger_list(), function(nm) {
-            div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
-                span(nm),
-                tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
-                       onclick = sprintf("Shiny.setInputValue('delete_ganger_click', '%s', {priority:'event'}); return false;", nm),
-                       "Delete")
-            )
-          }))
+      accordion(id = "admin_accordion", open = "Google Sheets Sync",
+        accordion_panel("Google Sheets Sync", value = "Google Sheets Sync",
+          div(class = "admin-card",
+              p(class = "text-muted",
+                if (SHEETS_SYNC_ENABLED)
+                  "The app is the only place data gets edited. Every change here pushes out to the Google Sheet automatically - the Sheet is a live read-only mirror, not an input."
+                else
+                  "Sync is currently turned off (SHEETS_SYNC_ENABLED is FALSE in app.R). See the setup notes at the top of app.R to turn it on."
+              ),
+              fluidRow(
+                column(4, metric_card(if (SHEETS_SYNC_ENABLED) "On" else "Off", "Sync Status",
+                                      colour = if (SHEETS_SYNC_ENABLED) "#3E7C59" else "#5B6770")),
+                column(4, metric_card(textOutput("admin_last_synced", inline = TRUE), "Last Synced")),
+                column(4, div(style = "padding-top:14px;", actionButton("admin_sync_now", "Sync Now", class = "btn-primary btn-sm")))
+              ),
+              uiOutput("admin_sync_error_ui")
+          )
+        ),
+        accordion_panel("Machines With No Driver", value = "Machines With No Driver",
+          div(class = "admin-card",
+              p(class = "text-muted", "Active plant with nobody currently assigned - worth double-checking these."),
+              uiOutput("admin_no_driver_ui")
+          )
+        ),
+        accordion_panel("Staff Activity (This Week)", value = "Staff Activity (This Week)",
+          div(class = "admin-card",
+              p(class = "text-muted", "Quick count of History entries and Invoices logged by each person this week. For a specific week/month or person, use the 'Report by input' filter on the Reports tab."),
+              tableOutput("admin_staff_activity_table")
+          )
+        ),
+        accordion_panel("Company List", value = "Company List",
+          div(class = "admin-card",
+              p(class = "text-muted", "Suppliers/garages available in the Company dropdown when adding an invoice or logging subcontractor mechanic work."),
+              fluidRow(
+                column(8, textInput("admin_company_new", NULL, placeholder = "e.g. Arnold Clark")),
+                column(4, actionButton("admin_company_add", "+ Add", class = "btn-primary btn-sm"))
+              ),
+              uiOutput("admin_company_list_ui")
+          )
+        ),
+        accordion_panel("Ganger List", value = "Ganger List",
+          div(class = "admin-card",
+              p(class = "text-muted", "Names available in the Ganger dropdown when creating or editing a gang sheet."),
+              fluidRow(
+                column(8, textInput("admin_ganger_new", NULL, placeholder = "e.g. John Smith")),
+                column(4, actionButton("admin_ganger_add", "+ Add", class = "btn-primary btn-sm"))
+              ),
+              uiOutput("admin_ganger_list_ui")
+          )
+        )
       )
     )
+  })
+  output$admin_sync_error_ui <- renderUI({
+    if (!is.null(sheets_last_error())) div(class = "alert alert-danger mt-3", sheets_last_error())
+  })
+  output$admin_no_driver_ui <- renderUI({
+    df <- inventory_data()
+    unassigned <- df[df$Active == "Yes" & (is.na(df$Driver) | df$Driver == ""), ]
+    if (nrow(unassigned) == 0) div(class = "alert alert-secondary mb-0", "Every active item has a driver assigned.")
+    else tagList(
+      div(class = "alert alert-warning", paste0(nrow(unassigned), " active item(s) with no driver.")),
+      tableOutput("admin_no_driver_table")
+    )
+  })
+  output$admin_company_list_ui <- renderUI({
+    if (length(company_list()) == 0) p(class = "text-muted mb-0", "No companies added yet.")
+    else tagList(lapply(company_list(), function(nm) {
+      div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
+          span(nm),
+          tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
+                 onclick = sprintf("Shiny.setInputValue('delete_company_click', '%s', {priority:'event'}); return false;", nm),
+                 "Delete")
+      )
+    }))
+  })
+  output$admin_ganger_list_ui <- renderUI({
+    if (length(ganger_list()) == 0) p(class = "text-muted mb-0", "No gangers added yet.")
+    else tagList(lapply(ganger_list(), function(nm) {
+      div(class = "d-flex justify-content-between align-items-center", style = "padding:4px 0; border-bottom:1px solid #eee;",
+          span(nm),
+          tags$a(href = "#", style = "font-size:0.85rem; color:#9C2B2B;",
+                 onclick = sprintf("Shiny.setInputValue('delete_ganger_click', '%s', {priority:'event'}); return false;", nm),
+                 "Delete")
+      )
+    }))
   })
   output$admin_last_synced <- renderText({
     t <- sheets_last_synced()
