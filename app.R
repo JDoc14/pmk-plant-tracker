@@ -25,8 +25,7 @@
 #
 # ---- FIRST TIME SETUP ----
 #   install.packages(c("shiny", "shinymanager", "bslib", "dplyr",
-#                       "plotly", "scales", "googlesheets4",
-#                       "gridExtra"))
+#                       "plotly", "scales", "googlesheets4"))
 # Then open this file in RStudio and click "Run App".
 #
 # ---- GOOGLE SHEETS SYNC SETUP (one-time, does NOT need RStudio) ----
@@ -80,8 +79,9 @@ library(bslib)
 library(dplyr)
 library(plotly)
 library(scales)
-library(grid)
-library(gridExtra)
+library(grid)  # base R package (ships with every R install) - used for
+                # the PDF report; deliberately NOT gridExtra, which
+                # Posit Connect Cloud's fixed package set doesn't include.
 SHEETS_SYNC_ENABLED <- TRUE
 SHEETS_SERVICE_ACCOUNT_JSON <- "sheets_service_account.json"
 SHEETS_SPREADSHEET_ID <- "1ige-Yigs_Qp8aWRBxPy9fR3_sJjhe5fZO3ZrUbCQmZQ"
@@ -2579,27 +2579,48 @@ server <- function(input, output, session) {
     )
   }
   # ---- Full PDF report (Plant & Drivers / History / Invoices) ----
-  # Built with base R's pdf() device + grid/gridExtra table grobs
-  # only - deliberately NOT rmarkdown/pandoc/LaTeX, since those need
-  # extra system software that may not be available wherever this
-  # app is hosted. This approach only needs the gridExtra R package,
-  # so it renders identically on any machine running R.
-  report_table_theme <- ttheme_default(
-    core = list(fg_params = list(fontsize = 8, hjust = 0, x = 0.02),
-                bg_params = list(fill = c("#FFFFFF", "#F4F2EC"))),
-    colhead = list(fg_params = list(fontsize = 9, fontface = "bold", col = "white", hjust = 0, x = 0.02),
-                   bg_params = list(fill = "#0B4D3A"))
-  )
+  # Built with ONLY base R's pdf() device + the base `grid` package
+  # (no gridExtra, no rmarkdown/pandoc/LaTeX) - `grid` ships with
+  # every R installation, so this can never fail to install the way
+  # gridExtra did on Posit Connect Cloud's fixed package set. Tables
+  # are drawn by hand: a viewport per cell, positioned via grid.layout.
+  draw_grid_table <- function(df, y = 0.5, height = 0.85, fontsize = 8, header_fontsize = 9) {
+    nr <- nrow(df); nc <- ncol(df)
+    pushViewport(viewport(y = unit(y, "npc"), height = unit(height, "npc"), width = unit(0.96, "npc")))
+    pushViewport(viewport(layout = grid.layout(nrow = nr + 1, ncol = nc)))
+    col_names <- names(df)
+    for (j in seq_len(nc)) {
+      pushViewport(viewport(layout.pos.row = 1, layout.pos.col = j))
+      grid.rect(gp = gpar(fill = "#0B4D3A", col = "white"))
+      grid.text(col_names[j], x = unit(0.03, "npc"), hjust = 0, gp = gpar(col = "white", fontsize = header_fontsize, fontface = "bold"))
+      popViewport()
+    }
+    if (nr > 0) {
+      for (i in seq_len(nr)) {
+        fill <- if (i %% 2 == 1) "#FFFFFF" else "#F4F2EC"
+        for (j in seq_len(nc)) {
+          pushViewport(viewport(layout.pos.row = i + 1, layout.pos.col = j))
+          grid.rect(gp = gpar(fill = fill, col = "#E2DFD6"))
+          cell_text <- as.character(df[i, j])
+          if (nchar(cell_text) > 55) cell_text <- paste0(substr(cell_text, 1, 52), "...")
+          grid.text(cell_text, x = unit(0.03, "npc"), hjust = 0, gp = gpar(fontsize = fontsize))
+          popViewport()
+        }
+      }
+    }
+    popViewport(2)
+  }
   # Draws one PDF page: a title (plus optional subtitle) with a data
-  # frame rendered as a table underneath. Note: grid.arrange() starts
-  # a fresh page itself (newpage=TRUE by default) - an extra explicit
-  # grid.newpage() here would leave a blank page before every table
-  # page, so this deliberately does NOT call grid.newpage().
+  # frame rendered as a table underneath.
   draw_report_page <- function(title, subtitle, df) {
-    title_grob <- textGrob(title, x = 0.02, hjust = 0, gp = gpar(fontsize = 15, fontface = "bold", col = "#0B4D3A"))
-    sub_grob <- textGrob(if (is.null(subtitle)) "" else subtitle, x = 0.02, hjust = 0, gp = gpar(fontsize = 9, col = "#5B6770"))
-    table_grob <- tableGrob(df, rows = NULL, theme = report_table_theme)
-    grid.arrange(title_grob, sub_grob, table_grob, heights = unit(c(0.45, 0.35, 9.2), "null"))
+    grid.newpage()
+    grid.text(title, x = unit(0.02, "npc"), y = unit(0.97, "npc"), just = c("left", "top"),
+              gp = gpar(fontsize = 15, fontface = "bold", col = "#0B4D3A"))
+    if (!is.null(subtitle) && subtitle != "") {
+      grid.text(subtitle, x = unit(0.02, "npc"), y = unit(0.925, "npc"), just = c("left", "top"),
+                gp = gpar(fontsize = 9, col = "#5B6770"))
+    }
+    draw_grid_table(df, y = 0.44, height = 0.8)
   }
   # Splits a data frame across as many PDF pages as it needs so wide
   # sections (155 plant items, a month of invoices) don't get cut off
@@ -2623,11 +2644,11 @@ server <- function(input, output, session) {
     on.exit(dev.off(), add = TRUE)
     # ---- Cover page ----
     grid.newpage()
-    grid.text("PMK CIVIL ENGINEERING", y = unit(0.74, "npc"), gp = gpar(fontsize = 26, fontface = "bold", col = "#0B4D3A"))
-    grid.text(paste0(kind, " Report - ", period_label), y = unit(0.65, "npc"), gp = gpar(fontsize = 16, col = "#12241C"))
+    grid.text("PMK CIVIL ENGINEERING", y = unit(0.78, "npc"), gp = gpar(fontsize = 26, fontface = "bold", col = "#0B4D3A"))
+    grid.text(paste0(kind, " Report - ", period_label), y = unit(0.71, "npc"), gp = gpar(fontsize = 16, col = "#12241C"))
     grid.text(paste0(format(period_start, "%d %b %Y"), " to ", format(period_end, "%d %b %Y")),
-              y = unit(0.59, "npc"), gp = gpar(fontsize = 11, col = "#5B6770"))
-    grid.text(paste0("Generated ", format(Sys.time(), "%d %b %Y, %H:%M")), y = unit(0.53, "npc"), gp = gpar(fontsize = 9, col = "#999999"))
+              y = unit(0.66, "npc"), gp = gpar(fontsize = 11, col = "#5B6770"))
+    grid.text(paste0("Generated ", format(Sys.time(), "%d %b %Y, %H:%M")), y = unit(0.61, "npc"), gp = gpar(fontsize = 9, col = "#999999"))
     metrics_df <- data.frame(
       Metric = c("Total Spend", "Invoices Logged", "History Entries Logged", "Active Plant Items"),
       Value = c(dollar(sum(invoices_df$Amount, na.rm = TRUE), prefix = "£"),
@@ -2635,9 +2656,8 @@ server <- function(input, output, session) {
                 as.character(sum(inv_data$Active == "Yes"))),
       stringsAsFactors = FALSE
     )
-    mg <- tableGrob(metrics_df, rows = NULL, theme = report_table_theme, widths = unit(c(2, 1.2), "in"))
-    pushViewport(viewport(y = unit(0.3, "npc"), height = unit(1.6, "in")))
-    grid.draw(mg)
+    pushViewport(viewport(y = unit(0.4, "npc"), height = unit(0.22, "npc"), width = unit(0.4, "npc")))
+    draw_grid_table(metrics_df, y = 0.5, height = 1)
     popViewport()
     # ---- Plant & Drivers (live snapshot, not period-scoped - who's
     # currently driving what doesn't have a month attached to it) ----
