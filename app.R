@@ -25,7 +25,8 @@
 #
 # ---- FIRST TIME SETUP ----
 #   install.packages(c("shiny", "shinymanager", "bslib", "dplyr",
-#                       "plotly", "scales", "googlesheets4"))
+#                       "plotly", "scales", "googlesheets4",
+#                       "gridExtra"))
 # Then open this file in RStudio and click "Run App".
 #
 # ---- GOOGLE SHEETS SYNC SETUP (one-time, does NOT need RStudio) ----
@@ -79,6 +80,8 @@ library(bslib)
 library(dplyr)
 library(plotly)
 library(scales)
+library(grid)
+library(gridExtra)
 SHEETS_SYNC_ENABLED <- TRUE
 SHEETS_SERVICE_ACCOUNT_JSON <- "sheets_service_account.json"
 SHEETS_SPREADSHEET_ID <- "1ige-Yigs_Qp8aWRBxPy9fR3_sJjhe5fZO3ZrUbCQmZQ"
@@ -2575,6 +2578,106 @@ server <- function(input, output, session) {
       )
     )
   }
+  # ---- Full PDF report (Plant & Drivers / History / Invoices) ----
+  # Built with base R's pdf() device + grid/gridExtra table grobs
+  # only - deliberately NOT rmarkdown/pandoc/LaTeX, since those need
+  # extra system software that may not be available wherever this
+  # app is hosted. This approach only needs the gridExtra R package,
+  # so it renders identically on any machine running R.
+  report_table_theme <- ttheme_default(
+    core = list(fg_params = list(fontsize = 8, hjust = 0, x = 0.02),
+                bg_params = list(fill = c("#FFFFFF", "#F4F2EC"))),
+    colhead = list(fg_params = list(fontsize = 9, fontface = "bold", col = "white", hjust = 0, x = 0.02),
+                   bg_params = list(fill = "#0B4D3A"))
+  )
+  # Draws one PDF page: a title (plus optional subtitle) with a data
+  # frame rendered as a table underneath. Note: grid.arrange() starts
+  # a fresh page itself (newpage=TRUE by default) - an extra explicit
+  # grid.newpage() here would leave a blank page before every table
+  # page, so this deliberately does NOT call grid.newpage().
+  draw_report_page <- function(title, subtitle, df) {
+    title_grob <- textGrob(title, x = 0.02, hjust = 0, gp = gpar(fontsize = 15, fontface = "bold", col = "#0B4D3A"))
+    sub_grob <- textGrob(if (is.null(subtitle)) "" else subtitle, x = 0.02, hjust = 0, gp = gpar(fontsize = 9, col = "#5B6770"))
+    table_grob <- tableGrob(df, rows = NULL, theme = report_table_theme)
+    grid.arrange(title_grob, sub_grob, table_grob, heights = unit(c(0.45, 0.35, 9.2), "null"))
+  }
+  # Splits a data frame across as many PDF pages as it needs so wide
+  # sections (155 plant items, a month of invoices) don't get cut off
+  # or squeezed onto one unreadable page.
+  draw_report_section <- function(title, subtitle, df, rows_per_page = 24) {
+    if (is.null(df) || nrow(df) == 0) {
+      draw_report_page(title, subtitle, data.frame(Message = "No records for this period."))
+      return(invisible())
+    }
+    n <- nrow(df)
+    pages <- ceiling(n / rows_per_page)
+    for (p in seq_len(pages)) {
+      idx <- ((p - 1) * rows_per_page + 1):min(p * rows_per_page, n)
+      page_title <- if (pages > 1) paste0(title, "  (page ", p, " of ", pages, ")") else title
+      draw_report_page(page_title, subtitle, df[idx, , drop = FALSE])
+    }
+  }
+  generate_full_report_pdf <- function(file, kind, period_label, period_start, period_end,
+                                       inv_data, history_df, invoices_df) {
+    pdf(file, width = 11.69, height = 8.27)  # A4 landscape - plenty of room for wide tables
+    on.exit(dev.off(), add = TRUE)
+    # ---- Cover page ----
+    grid.newpage()
+    grid.text("PMK CIVIL ENGINEERING", y = unit(0.74, "npc"), gp = gpar(fontsize = 26, fontface = "bold", col = "#0B4D3A"))
+    grid.text(paste0(kind, " Report - ", period_label), y = unit(0.65, "npc"), gp = gpar(fontsize = 16, col = "#12241C"))
+    grid.text(paste0(format(period_start, "%d %b %Y"), " to ", format(period_end, "%d %b %Y")),
+              y = unit(0.59, "npc"), gp = gpar(fontsize = 11, col = "#5B6770"))
+    grid.text(paste0("Generated ", format(Sys.time(), "%d %b %Y, %H:%M")), y = unit(0.53, "npc"), gp = gpar(fontsize = 9, col = "#999999"))
+    metrics_df <- data.frame(
+      Metric = c("Total Spend", "Invoices Logged", "History Entries Logged", "Active Plant Items"),
+      Value = c(dollar(sum(invoices_df$Amount, na.rm = TRUE), prefix = "£"),
+                as.character(nrow(invoices_df)), as.character(nrow(history_df)),
+                as.character(sum(inv_data$Active == "Yes"))),
+      stringsAsFactors = FALSE
+    )
+    mg <- tableGrob(metrics_df, rows = NULL, theme = report_table_theme, widths = unit(c(2, 1.2), "in"))
+    pushViewport(viewport(y = unit(0.3, "npc"), height = unit(1.6, "in")))
+    grid.draw(mg)
+    popViewport()
+    # ---- Plant & Drivers (live snapshot, not period-scoped - who's
+    # currently driving what doesn't have a month attached to it) ----
+    plant_out <- inv_data[inv_data$Active == "Yes", ]
+    if (nrow(plant_out) > 0) {
+      plant_out <- plant_out[order(plant_out$Category, plant_out$SubCategory), ]
+      plant_out <- data.frame(
+        Item = vapply(seq_len(nrow(plant_out)), function(i) item_identifier(plant_out[i, ]), character(1)),
+        Machine = ifelse(plant_out$Machine == "", "-", plant_out$Machine),
+        Category = plant_out$Category, `Sub-Category` = plant_out$SubCategory,
+        Driver = ifelse(is.na(plant_out$Driver) | plant_out$Driver == "", "-", plant_out$Driver),
+        Location = ifelse(is.na(plant_out$Location) | plant_out$Location == "", "-", plant_out$Location),
+        check.names = FALSE, stringsAsFactors = FALSE
+      )
+    }
+    draw_report_section("Plant & Drivers", "Current snapshot as of report generation - not limited to this period.", plant_out, rows_per_page = 26)
+    # ---- History Entries logged in the period ----
+    hist_out <- history_df
+    if (nrow(hist_out) > 0) {
+      hist_out <- hist_out[order(hist_out$DateTime, decreasing = TRUE), ]
+      hist_out <- data.frame(`Date/Time` = hist_out$DateTime, Item = hist_out$ItemID, Type = hist_out$EntryType,
+                             Description = hist_out$Description, `Recorded By` = hist_out$RecordedBy,
+                             check.names = FALSE, stringsAsFactors = FALSE)
+    }
+    draw_report_section(paste0("History Entries - ", period_label), NULL, hist_out, rows_per_page = 22)
+    # ---- Invoices logged in the period ----
+    inv_out <- invoices_df
+    if (nrow(inv_out) > 0) {
+      inv_out <- inv_out[order(inv_out$Date), ]
+      inv_out <- data.frame(Date = inv_out$Date, Company = inv_out$Company, Item = inv_out$Reference_PMK_Number,
+                            Category = inv_out$Category, `Amount (£)` = sprintf("%.2f", inv_out$Amount),
+                            check.names = FALSE, stringsAsFactors = FALSE)
+    }
+    draw_report_section(paste0("Invoices - ", period_label), NULL, inv_out, rows_per_page = 22)
+    if (nrow(invoices_df) > 0) {
+      grid.newpage()
+      grid.text(paste0("Total Invoiced This Period: ", dollar(sum(invoices_df$Amount, na.rm = TRUE), prefix = "£")),
+                gp = gpar(fontsize = 16, fontface = "bold", col = "#0B4D3A"))
+    }
+  }
   weekly_report_ui <- function() {
     recorded_by_choices <- c("All", sort(unique(c(
       plant_history()$RecordedBy[plant_history()$RecordedBy != ""],
@@ -2585,7 +2688,9 @@ server <- function(input, output, session) {
       fluidRow(
         column(4, dateInput("wr_week_start", "Week starting (Monday)", value = floor_to_monday(Sys.Date()))),
         column(4, selectInput("wr_recorded_by", "Report by input (who logged it)", choices = recorded_by_choices, selected = "All")),
-        column(4, div(style = "margin-top:24px;", downloadButton("wr_download", "Download Weekly Invoices (CSV)", class = "btn-primary btn-sm")))
+        column(4, div(style = "margin-top:24px;",
+                      downloadButton("wr_pdf_download", "Download Full Report (PDF)", class = "btn-warning btn-sm mb-2 w-100"),
+                      downloadButton("wr_download", "Download Weekly Invoices (CSV)", class = "btn-primary btn-sm w-100")))
       ),
       fluidRow(
         column(3, metric_card(textOutput("wr_invoice_count", inline = TRUE), "Invoices This Week")),
@@ -2621,7 +2726,9 @@ server <- function(input, output, session) {
       fluidRow(
         column(4, selectInput("mr_month", "Month", choices = setNames(choices_vals, choices_labels), selected = format(Sys.Date(), "%Y-%m"))),
         column(4, selectInput("mr_recorded_by", "Report by input (who logged it)", choices = recorded_by_choices, selected = "All")),
-        column(4, div(style = "margin-top:24px;", downloadButton("mr_download", "Download Monthly Invoices (CSV)", class = "btn-primary btn-sm")))
+        column(4, div(style = "margin-top:24px;",
+                      downloadButton("mr_pdf_download", "Download Full Report (PDF)", class = "btn-warning btn-sm mb-2 w-100"),
+                      downloadButton("mr_download", "Download Monthly Invoices (CSV)", class = "btn-primary btn-sm w-100")))
       ),
       fluidRow(
         column(3, metric_card(textOutput("mr_total_spend", inline = TRUE), "Total Spend")),
@@ -2712,6 +2819,13 @@ server <- function(input, output, session) {
   output$wr_download <- downloadHandler(
     filename = function() paste0("pmk_weekly_report_", week_start(), ".csv"),
     content = function(file) write.csv(wr_invoices(), file, row.names = FALSE)
+  )
+  output$wr_pdf_download <- downloadHandler(
+    filename = function() paste0("pmk_weekly_report_", week_start(), ".pdf"),
+    content = function(file) {
+      generate_full_report_pdf(file, "Weekly", paste0("Week of ", format(week_start(), "%d %b %Y")),
+                               week_start(), week_end(), inventory_data(), wr_history(), wr_invoices())
+    }
   )
   # ---- Invoice Analysis (Reports > Invoice Analysis) ----
   # Ranks items by invoice count and by total spend, same Category/
@@ -2885,6 +2999,14 @@ server <- function(input, output, session) {
   output$mr_download <- downloadHandler(
     filename = function() paste0("pmk_monthly_report_", input$mr_month, ".csv"),
     content = function(file) write.csv(mr_invoices(), file, row.names = FALSE)
+  )
+  output$mr_pdf_download <- downloadHandler(
+    filename = function() paste0("pmk_monthly_report_", input$mr_month, ".pdf"),
+    content = function(file) {
+      mr <- month_range()
+      generate_full_report_pdf(file, "Monthly", format(mr$start, "%B %Y"),
+                               mr$start, mr$end, inventory_data(), mr_history(), mr_invoices())
+    }
   )
   # -------------------------------------------------------------
   # JOB CARDS & INSPECTIONS - weekly tick-box grid. Green square =
