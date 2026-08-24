@@ -588,6 +588,14 @@ server <- function(input, output, session) {
   ganger_list <- reactiveVal(sort(unique(gangers_loaded$Name[gangers_loaded$Name != ""])))
   companies_loaded <- load_initial_data(companies_seed, "Companies", c("Name"))
   company_list <- reactiveVal(sort(unique(companies_loaded$Name[companies_loaded$Name != ""])))
+  # Company pickers should never come up empty just because nobody's
+  # populated the Admin > Company List card - fall back to every
+  # company name that's actually been used on an invoice already, so
+  # existing suppliers are always selectable/typeable even before
+  # anyone curates the admin list.
+  company_choices_all <- function() {
+    sort(unique(c(company_list(), invoices_data()$Company[!is.na(invoices_data()$Company) & invoices_data()$Company != ""])))
+  }
   notifications_loaded <- load_initial_data(notifications_seed, "Notifications", c("Time", "User", "Role", "Action"))
   notifications_log <- reactiveVal(notifications_loaded)
   # Called after a qualifying action (add history entry, add/edit/
@@ -1233,7 +1241,7 @@ server <- function(input, output, session) {
       conditionalPanel("input.ih_type == 'Mechanic Work'",
                        checkboxInput("ih_subcontractor", "Subcontractor work (creates an Invoice too)", value = FALSE),
                        conditionalPanel("input.ih_subcontractor == true",
-                                        selectizeInput("ih_sub_company", "Subcontractor Company *", choices = company_list(),
+                                        selectizeInput("ih_sub_company", "Subcontractor Company *", choices = company_choices_all(),
                                                        options = list(create = TRUE, placeholder = "Select or type a company name")),
                                         numericInput("ih_sub_amount", "Amount (£) *", value = NA)
                        )
@@ -2237,7 +2245,7 @@ server <- function(input, output, session) {
           p(class = "text-muted mb-2", "Filters below apply to Overview, Analysis, Companies and All Invoices."),
           fluidRow(
             column(4, dateRangeInput("inv_filter_dates", "Date range", start = date_min, end = date_max)),
-            column(4, selectizeInput("inv_filter_company", "Company", choices = company_list(), multiple = TRUE,
+            column(4, selectizeInput("inv_filter_company", "Company", choices = company_choices_all(), multiple = TRUE,
                                      options = list(placeholder = "All companies"))),
             column(4, selectizeInput("inv_filter_item", "Plant Item", choices = item_choices, multiple = TRUE,
                                      options = list(placeholder = "All items", render = item_render_js)))
@@ -2324,7 +2332,7 @@ server <- function(input, output, session) {
     init_items <- if (init_sub != "") items_for_picker(init_cat, init_sub, inventory_data()) else character(0)
     init_ref <- g("Reference_PMK_Number")
     if (init_ref != "" && !(init_ref %in% init_items)) init_items <- c(init_items, init_ref)
-    company_choices <- company_list()
+    company_choices <- company_choices_all()
     init_company <- g("Company")
     if (init_company != "" && !(init_company %in% company_choices)) company_choices <- c(company_choices, init_company)
     init_amount <- if (is.null(prefill)) NA else suppressWarnings(as.numeric(prefill[["Amount"]]))
