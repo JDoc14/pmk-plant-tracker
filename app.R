@@ -1063,7 +1063,7 @@ server <- function(input, output, session) {
   })
   browse_tile <- function(id, title, count, click_input) {
     div(class = "browse-tile", role = "button", tabindex = "0",
-        onclick = sprintf("Shiny.setInputValue('%s', '%s', {priority:'event'})", click_input, id),
+        onclick = sprintf("Shiny.setInputValue('%s', '%s', {priority:'event'})", click_input, js_escape_sq(id)),
         onkeypress = "if(event.key==='Enter'||event.key===' '){this.click()}",
         div(class = "tile-title", title),
         div(class = "tile-count", paste0(count, " item(s)"))
