@@ -2584,10 +2584,42 @@ server <- function(input, output, session) {
   # every R installation, so this can never fail to install the way
   # gridExtra did on Posit Connect Cloud's fixed package set. Tables
   # are drawn by hand: a viewport per cell, positioned via grid.layout.
-  draw_grid_table <- function(df, y = 0.5, height = 0.85, fontsize = 8, header_fontsize = 9) {
+  # Renders one table. Columns named in wrap_cols get their text
+  # wrapped onto multiple lines (via strwrap + embedded \n, which
+  # grid.text renders natively) instead of being truncated with "...",
+  # so long free-text fields like Description stay fully readable.
+  # Row heights are "null" units sized to each row's line count, so
+  # a 5-line description gets a tall row and a 1-line one stays thin.
+  draw_grid_table <- function(df, col_widths = NULL, wrap_cols = character(0), wrap_chars = 50,
+                              y = 0.5, height = 0.85, fontsize = 8, header_fontsize = 9) {
     nr <- nrow(df); nc <- ncol(df)
+    if (is.null(col_widths)) col_widths <- rep(1, nc)
+    cell_lines <- vector("list", max(nr, 0))
+    row_weights <- numeric(max(nr, 0))
+    if (nr > 0) {
+      for (i in seq_len(nr)) {
+        lines_per_col <- vector("list", nc)
+        maxlines <- 1
+        for (j in seq_len(nc)) {
+          val <- as.character(df[i, j])
+          if (is.na(val)) val <- "-"
+          if (names(df)[j] %in% wrap_cols) {
+            wrapped <- strwrap(val, width = wrap_chars)
+            if (length(wrapped) == 0) wrapped <- "-"
+          } else {
+            wrapped <- if (nchar(val) > 40) paste0(substr(val, 1, 37), "...") else val
+          }
+          lines_per_col[[j]] <- wrapped
+          maxlines <- max(maxlines, length(wrapped))
+        }
+        cell_lines[[i]] <- lines_per_col
+        row_weights[i] <- maxlines
+      }
+    }
     pushViewport(viewport(y = unit(y, "npc"), height = unit(height, "npc"), width = unit(0.96, "npc")))
-    pushViewport(viewport(layout = grid.layout(nrow = nr + 1, ncol = nc)))
+    heights <- unit(c(1.3, if (nr > 0) row_weights else numeric(0)), "null")
+    widths <- unit(col_widths, "null")
+    pushViewport(viewport(layout = grid.layout(nrow = nr + 1, ncol = nc, heights = heights, widths = widths)))
     col_names <- names(df)
     for (j in seq_len(nc)) {
       pushViewport(viewport(layout.pos.row = 1, layout.pos.col = j))
@@ -2601,9 +2633,9 @@ server <- function(input, output, session) {
         for (j in seq_len(nc)) {
           pushViewport(viewport(layout.pos.row = i + 1, layout.pos.col = j))
           grid.rect(gp = gpar(fill = fill, col = "#E2DFD6"))
-          cell_text <- as.character(df[i, j])
-          if (nchar(cell_text) > 55) cell_text <- paste0(substr(cell_text, 1, 52), "...")
-          grid.text(cell_text, x = unit(0.03, "npc"), hjust = 0, gp = gpar(fontsize = fontsize))
+          cell_text <- paste(cell_lines[[i]][[j]], collapse = "\n")
+          grid.text(cell_text, x = unit(0.03, "npc"), y = unit(0.9, "npc"), hjust = 0, vjust = 1,
+                    gp = gpar(fontsize = fontsize, lineheight = 0.95))
           popViewport()
         }
       }
@@ -2612,7 +2644,7 @@ server <- function(input, output, session) {
   }
   # Draws one PDF page: a title (plus optional subtitle) with a data
   # frame rendered as a table underneath.
-  draw_report_page <- function(title, subtitle, df) {
+  draw_report_page <- function(title, subtitle, df, col_widths = NULL, wrap_cols = character(0), wrap_chars = 50) {
     grid.newpage()
     grid.text(title, x = unit(0.02, "npc"), y = unit(0.97, "npc"), just = c("left", "top"),
               gp = gpar(fontsize = 15, fontface = "bold", col = "#0B4D3A"))
@@ -2620,28 +2652,166 @@ server <- function(input, output, session) {
       grid.text(subtitle, x = unit(0.02, "npc"), y = unit(0.925, "npc"), just = c("left", "top"),
                 gp = gpar(fontsize = 9, col = "#5B6770"))
     }
-    draw_grid_table(df, y = 0.44, height = 0.8)
+    draw_grid_table(df, col_widths = col_widths, wrap_cols = wrap_cols, wrap_chars = wrap_chars, y = 0.44, height = 0.8)
   }
   # Splits a data frame across as many PDF pages as it needs so wide
   # sections (155 plant items, a month of invoices) don't get cut off
-  # or squeezed onto one unreadable page.
-  draw_report_section <- function(title, subtitle, df, rows_per_page = 24) {
+  # or squeezed onto one unreadable page. Paginates on a "weight"
+  # budget (1 per line, so a wrapped 4-line description counts as 4)
+  # rather than a flat row count, since wrapped rows vary in height.
+  draw_report_section <- function(title, subtitle, df, col_widths = NULL, wrap_cols = character(0),
+                                  wrap_chars = 50, max_weight = 24) {
     if (is.null(df) || nrow(df) == 0) {
       draw_report_page(title, subtitle, data.frame(Message = "No records for this period."))
       return(invisible())
     }
     n <- nrow(df)
-    pages <- ceiling(n / rows_per_page)
-    for (p in seq_len(pages)) {
-      idx <- ((p - 1) * rows_per_page + 1):min(p * rows_per_page, n)
-      page_title <- if (pages > 1) paste0(title, "  (page ", p, " of ", pages, ")") else title
-      draw_report_page(page_title, subtitle, df[idx, , drop = FALSE])
+    weights <- vapply(seq_len(n), function(i) {
+      m <- 1
+      for (cn in wrap_cols) {
+        v <- as.character(df[[cn]][i])
+        if (!is.na(v)) m <- max(m, length(strwrap(v, width = wrap_chars)))
+      }
+      m
+    }, numeric(1))
+    pages <- list(); cur <- integer(0); cur_w <- 0
+    for (i in seq_len(n)) {
+      w <- weights[i]
+      if (cur_w + w > max_weight && length(cur) > 0) {
+        pages[[length(pages) + 1]] <- cur
+        cur <- integer(0); cur_w <- 0
+      }
+      cur <- c(cur, i); cur_w <- cur_w + w
     }
+    if (length(cur) > 0) pages[[length(pages) + 1]] <- cur
+    np <- length(pages)
+    for (p in seq_len(np)) {
+      idx <- pages[[p]]
+      page_title <- if (np > 1) paste0(title, "  (page ", p, " of ", np, ")") else title
+      draw_report_page(page_title, subtitle, df[idx, , drop = FALSE], col_widths, wrap_cols, wrap_chars)
+    }
+  }
+  # Draws one or two ggplot objects side by side as a static image on
+  # their own PDF page - ggplot objects are grid-compatible grobs, so
+  # this reuses the exact same charts as the interactive tabs without
+  # needing plotly.
+  draw_chart_page <- function(title, subtitle, plots, labels) {
+    grid.newpage()
+    grid.text(title, x = unit(0.02, "npc"), y = unit(0.97, "npc"), just = c("left", "top"),
+              gp = gpar(fontsize = 15, fontface = "bold", col = "#0B4D3A"))
+    if (!is.null(subtitle) && subtitle != "") {
+      grid.text(subtitle, x = unit(0.02, "npc"), y = unit(0.925, "npc"), just = c("left", "top"),
+                gp = gpar(fontsize = 9, col = "#5B6770"))
+    }
+    n <- length(plots)
+    pushViewport(viewport(y = unit(0.42, "npc"), height = unit(0.78, "npc"), width = unit(0.96, "npc")))
+    pushViewport(viewport(layout = grid.layout(nrow = 1, ncol = n)))
+    for (i in seq_len(n)) {
+      pushViewport(viewport(layout.pos.row = 1, layout.pos.col = i))
+      grid.text(labels[i], y = unit(0.98, "npc"), gp = gpar(fontsize = 10, fontface = "bold", col = "#12241C"))
+      pushViewport(viewport(y = unit(0.45, "npc"), height = unit(0.86, "npc")))
+      grid.draw(ggplotGrob(plots[[i]]))
+      popViewport()
+      popViewport()
+    }
+    popViewport(2)
+  }
+  # ---- Job Cards & Inspections tile grid, reimplemented for the PDF ----
+  # output$jg_grid in the app is built from raw HTML divs, which can't
+  # be embedded in a grid-based PDF, so this redraws the same
+  # week-by-item colour grid using grid.rect() instead.
+  draw_tile_legend <- function(y = 0.07) {
+    items <- list(c("Service Inspection", "#3E7C59"), c("Job Card", "#D9A400"),
+                  c("Mechanic Work", "#D6598E"), c("Multiple", "#7A4F79"), c("Nothing logged", "#E2E2E2"))
+    n <- length(items)
+    for (i in seq_len(n)) {
+      x0 <- (i - 1) / n + 0.01
+      grid.rect(x = unit(x0, "npc"), y = unit(y, "npc"), width = unit(0.012, "npc"), height = unit(0.018, "npc"),
+                just = "left", gp = gpar(fill = items[[i]][2], col = NA))
+      grid.text(items[[i]][1], x = unit(x0 + 0.016, "npc"), y = unit(y, "npc"), just = "left",
+                gp = gpar(fontsize = 7, col = "#5B6770"))
+    }
+  }
+  draw_tile_grid_page <- function(title, subtitle, items, weeks, ev) {
+    grid.newpage()
+    grid.text(title, x = unit(0.02, "npc"), y = unit(0.97, "npc"), just = c("left", "top"),
+              gp = gpar(fontsize = 15, fontface = "bold", col = "#0B4D3A"))
+    if (!is.null(subtitle) && subtitle != "") {
+      grid.text(subtitle, x = unit(0.02, "npc"), y = unit(0.925, "npc"), just = c("left", "top"),
+                gp = gpar(fontsize = 9, col = "#5B6770"))
+    }
+    draw_tile_legend()
+    n_items <- nrow(items); n_weeks <- length(weeks)
+    pushViewport(viewport(x = unit(0.02, "npc"), y = unit(0.87, "npc"), width = unit(0.96, "npc"),
+                          height = unit(0.75, "npc"), just = c("left", "top")))
+    pushViewport(viewport(layout = grid.layout(
+      nrow = n_items + 1, ncol = n_weeks + 1,
+      widths = unit(c(1.7, rep(1, n_weeks)), c("inches", rep("null", n_weeks))),
+      heights = unit(c(0.3, rep(1, n_items)), c("inches", rep("null", n_items)))
+    )))
+    for (w in seq_len(n_weeks)) {
+      if (n_weeks <= 12 || w %% 4 == 1) {
+        pushViewport(viewport(layout.pos.row = 1, layout.pos.col = w + 1))
+        grid.text(format(weeks[w], "%d %b"), gp = gpar(fontsize = 6, col = "#8a8a8a"), rot = if (n_weeks > 12) 45 else 0)
+        popViewport()
+      }
+    }
+    for (i in seq_len(n_items)) {
+      row <- items[i, ]
+      pushViewport(viewport(layout.pos.row = i + 1, layout.pos.col = 1))
+      grid.text(item_identifier(row), x = unit(0.02, "npc"), hjust = 0, gp = gpar(fontsize = 7, fontface = "bold"))
+      popViewport()
+      for (w in seq_len(n_weeks)) {
+        wk <- weeks[w]
+        matches <- if (nrow(ev) == 0) ev else ev[ev$ItemID == row$ItemID & ev$Week == wk, ]
+        types_present <- if (nrow(matches) == 0) character(0) else intersect(names(JG_TYPE_COLOURS), unique(matches$EntryType))
+        col <- if (length(types_present) == 0) "#E2E2E2"
+               else if (length(types_present) == 1) JG_TYPE_COLOURS[[types_present[1]]]
+               else "#7A4F79"
+        pushViewport(viewport(layout.pos.row = i + 1, layout.pos.col = w + 1))
+        grid.rect(width = unit(0.78, "npc"), height = unit(0.78, "npc"), gp = gpar(fill = col, col = NA))
+        popViewport()
+      }
+    }
+    popViewport(2)
+  }
+  # Paginates the tile grid across pages by item rows (weeks stay
+  # fixed across all pages of the same section) - same reasoning as
+  # draw_report_section, just for tiles instead of table rows.
+  draw_tile_grid_section <- function(title, subtitle, items, weeks, ev, max_rows = 26) {
+    if (is.null(items) || nrow(items) == 0) {
+      draw_report_page(title, subtitle, data.frame(Message = "No plant items match this view."))
+      return(invisible())
+    }
+    n <- nrow(items)
+    pages <- ceiling(n / max_rows)
+    for (p in seq_len(pages)) {
+      idx <- ((p - 1) * max_rows + 1):min(p * max_rows, n)
+      page_title <- if (pages > 1) paste0(title, "  (page ", p, " of ", pages, ")") else title
+      draw_tile_grid_page(page_title, subtitle, items[idx, , drop = FALSE], weeks, ev)
+    }
+  }
+  weeks_in_range <- function(start_date, end_date) {
+    w0 <- floor_to_monday(start_date); w1 <- floor_to_monday(end_date)
+    if (w1 < w0) w1 <- w0
+    seq(w0, w1, by = "1 week")
+  }
+  weeks_last_52 <- function(end_date) {
+    w1 <- floor_to_monday(end_date)
+    rev(seq(w1, by = "-1 week", length.out = 52))
   }
   generate_full_report_pdf <- function(file, kind, period_label, period_start, period_end,
                                        inv_data, history_df, invoices_df) {
     pdf(file, width = 11.69, height = 8.27)  # A4 landscape - plenty of room for wide tables
     on.exit(dev.off(), add = TRUE)
+    # Looks up an item's readable identifier + Category/Sub-Category
+    # from its ItemID, for the History Entries table below.
+    item_lookup <- function(item_id) {
+      row <- inv_data[inv_data$ItemID == item_id, ]
+      if (nrow(row) == 0) return(c(item_id, "-", "-"))
+      lbl <- item_identifier(row[1, ])
+      c(lbl, if (row$Category[1] == "") "-" else row$Category[1], if (row$SubCategory[1] == "") "-" else row$SubCategory[1])
+    }
     # ---- Cover page ----
     grid.newpage()
     grid.text("PMK CIVIL ENGINEERING", y = unit(0.78, "npc"), gp = gpar(fontsize = 26, fontface = "bold", col = "#0B4D3A"))
@@ -2650,10 +2820,11 @@ server <- function(input, output, session) {
               y = unit(0.66, "npc"), gp = gpar(fontsize = 11, col = "#5B6770"))
     grid.text(paste0("Generated ", format(Sys.time(), "%d %b %Y, %H:%M")), y = unit(0.61, "npc"), gp = gpar(fontsize = 9, col = "#999999"))
     metrics_df <- data.frame(
-      Metric = c("Total Spend", "Invoices Logged", "History Entries Logged", "Active Plant Items"),
+      Metric = c("Total Spend", "Service Inspections", "Job Cards", "Invoices"),
       Value = c(dollar(sum(invoices_df$Amount, na.rm = TRUE), prefix = "£"),
-                as.character(nrow(invoices_df)), as.character(nrow(history_df)),
-                as.character(sum(inv_data$Active == "Yes"))),
+                as.character(sum(history_df$EntryType == "Service Inspection")),
+                as.character(sum(history_df$EntryType == "Job Card")),
+                as.character(nrow(invoices_df))),
       stringsAsFactors = FALSE
     )
     pushViewport(viewport(y = unit(0.4, "npc"), height = unit(0.22, "npc"), width = unit(0.4, "npc")))
@@ -2673,30 +2844,97 @@ server <- function(input, output, session) {
         check.names = FALSE, stringsAsFactors = FALSE
       )
     }
-    draw_report_section("Plant & Drivers", "Current snapshot as of report generation - not limited to this period.", plant_out, rows_per_page = 26)
+    draw_report_section("Plant & Drivers", "Current snapshot as of report generation - not limited to this period.", plant_out, max_weight = 26)
     # ---- History Entries logged in the period ----
     hist_out <- history_df
     if (nrow(hist_out) > 0) {
       hist_out <- hist_out[order(hist_out$DateTime, decreasing = TRUE), ]
-      hist_out <- data.frame(`Date/Time` = hist_out$DateTime, Item = hist_out$ItemID, Type = hist_out$EntryType,
-                             Description = hist_out$Description, `Recorded By` = hist_out$RecordedBy,
-                             check.names = FALSE, stringsAsFactors = FALSE)
+      info <- t(vapply(hist_out$ItemID, item_lookup, character(3)))
+      hist_out <- data.frame(
+        `Date/Time` = hist_out$DateTime, Item = info[, 1], Type = hist_out$EntryType,
+        Category = info[, 2], `Sub-Category` = info[, 3],
+        Description = ifelse(is.na(hist_out$Description) | hist_out$Description == "", "-", hist_out$Description),
+        `Recorded By` = hist_out$RecordedBy,
+        check.names = FALSE, stringsAsFactors = FALSE
+      )
     }
-    draw_report_section(paste0("History Entries - ", period_label), NULL, hist_out, rows_per_page = 22)
+    draw_report_section(paste0("History Entries - ", period_label), NULL, hist_out,
+                        col_widths = c(1.3, 1.1, 1, 0.9, 1.1, 3, 1), wrap_cols = "Description", wrap_chars = 55, max_weight = 18)
     # ---- Invoices logged in the period ----
     inv_out <- invoices_df
     if (nrow(inv_out) > 0) {
       inv_out <- inv_out[order(inv_out$Date), ]
-      inv_out <- data.frame(Date = inv_out$Date, Company = inv_out$Company, Item = inv_out$Reference_PMK_Number,
-                            Category = inv_out$Category, `Amount (£)` = sprintf("%.2f", inv_out$Amount),
-                            check.names = FALSE, stringsAsFactors = FALSE)
+      inv_out <- data.frame(
+        Date = inv_out$Date, Company = inv_out$Company, Item = inv_out$Reference_PMK_Number,
+        Category = ifelse(inv_out$Category == "", "-", inv_out$Category),
+        `Sub-Category` = ifelse(inv_out$SubCategory == "", "-", inv_out$SubCategory),
+        Description = ifelse(is.na(inv_out$Description) | inv_out$Description == "", "-", inv_out$Description),
+        `Amount (£)` = sprintf("%.2f", inv_out$Amount),
+        check.names = FALSE, stringsAsFactors = FALSE
+      )
     }
-    draw_report_section(paste0("Invoices - ", period_label), NULL, inv_out, rows_per_page = 22)
+    draw_report_section(paste0("Invoices - ", period_label), NULL, inv_out,
+                        col_widths = c(0.9, 1.3, 1, 0.9, 1.1, 2.8, 0.9), wrap_cols = "Description", wrap_chars = 50, max_weight = 18)
     if (nrow(invoices_df) > 0) {
       grid.newpage()
       grid.text(paste0("Total Invoiced This Period: ", dollar(sum(invoices_df$Amount, na.rm = TRUE), prefix = "£")),
                 gp = gpar(fontsize = 16, fontface = "bold", col = "#0B4D3A"))
     }
+    # ---- Invoice Analysis, scoped to this period ----
+    if (nrow(invoices_df) > 0) {
+      ia_agg <- invoices_df %>% group_by(Reference_PMK_Number) %>%
+        summarise(Count = n(), Total = sum(Amount, na.rm = TRUE), .groups = "drop") %>% arrange(desc(Total))
+      ia_agg$Label <- ia_agg$Reference_PMK_Number
+      p_count <- ggplot(head(ia_agg %>% arrange(desc(Count)), 10), aes(x = reorder(Label, Count), y = Count)) +
+        geom_col(fill = "#0B4D3A") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
+      p_spend <- ggplot(head(ia_agg, 10), aes(x = reorder(Label, Total), y = Total)) +
+        geom_col(fill = "#9C2B2B") + coord_flip() + scale_y_continuous(labels = label_dollar(prefix = "£")) +
+        labs(x = NULL, y = NULL) + gg_theme
+      draw_chart_page(paste0("Invoice Analysis - ", period_label), "Most frequently invoiced and most expensive plant items this period.",
+                      list(p_count, p_spend), c("Most Frequently Invoiced", "Most Expensive (Total £)"))
+    }
+    # ---- Plant Analysis, scoped to this period ----
+    if (nrow(history_df) > 0) {
+      pa_all <- history_df %>% group_by(ItemID) %>% summarise(Count = n(), .groups = "drop") %>% arrange(desc(Count))
+      pa_all$Label <- vapply(pa_all$ItemID, function(iid) item_lookup(iid)[1], character(1))
+      pa_jc_raw <- history_df[history_df$EntryType == "Job Card", ]
+      pa_jc <- if (nrow(pa_jc_raw) == 0) NULL else {
+        agg <- pa_jc_raw %>% group_by(ItemID) %>% summarise(Count = n(), .groups = "drop") %>% arrange(desc(Count))
+        agg$Label <- vapply(agg$ItemID, function(iid) item_lookup(iid)[1], character(1))
+        agg
+      }
+      p_hist <- ggplot(head(pa_all, 10), aes(x = reorder(Label, Count), y = Count)) +
+        geom_col(fill = "#0B4D3A") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
+      if (!is.null(pa_jc)) {
+        p_jc <- ggplot(head(pa_jc, 10), aes(x = reorder(Label, Count), y = Count)) +
+          geom_col(fill = "#D9A400") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
+        draw_chart_page(paste0("Plant Analysis - ", period_label), "Which plant items were logged against most this period.",
+                        list(p_hist, p_jc), c("Most Frequent History Entries", "Most Job Cards"))
+      } else {
+        draw_chart_page(paste0("Plant Analysis - ", period_label), "Which plant items were logged against most this period.",
+                        list(p_hist), c("Most Frequent History Entries"))
+      }
+    }
+    # ---- Job Cards & Inspections tile grids - placed last ----
+    ev_full <- plant_history()
+    ev_full <- ev_full[ev_full$EntryType %in% names(JG_TYPE_COLOURS), ]
+    if (nrow(ev_full) > 0) {
+      ev_full$DateOnly <- as.Date(substr(ev_full$DateTime, 1, 10))
+      ev_full$Week <- floor_to_monday(ev_full$DateOnly)
+    }
+    month_weeks <- weeks_in_range(period_start, period_end)
+    year_weeks <- weeks_last_52(period_end)
+    tile_items_all <- natural_sort_rows(inv_data[inv_data$Active == "Yes", ])
+    draw_tile_grid_section(paste0("Job Cards & Inspections - ", period_label),
+                           "All active plant, this period only.",
+                           tile_items_all, month_weeks, ev_full, max_rows = 26)
+    tile_items_etb <- natural_sort_rows(inv_data[inv_data$Active == "Yes" & inv_data$Category %in% c("Excavator", "Trailer", "Breaker"), ])
+    draw_tile_grid_section("Excavators, Trailers & Breakers - This Period",
+                           paste0(period_label, " only. Same legend as above."),
+                           tile_items_etb, month_weeks, ev_full, max_rows = 26)
+    draw_tile_grid_section("Excavators, Trailers & Breakers - Last 12 Months",
+                           "Full rolling year. Same legend as above.",
+                           tile_items_etb, year_weeks, ev_full, max_rows = 26)
   }
   weekly_report_ui <- function() {
     recorded_by_choices <- c("All", sort(unique(c(
