@@ -1268,7 +1268,7 @@ server <- function(input, output, session) {
                          )
                        })),
                        textAreaInput("sv_defects", "Defects Found", rows = 2, placeholder = "Optional - only needed if something's unticked above"),
-                       textInput("sv_rectified_by", "Rectified By", placeholder = "Optional")
+                       textAreaInput("sv_rectified_by", "Rectified By", placeholder = "Optional", rows = 2)
       ),
       # ---- Job Card: mirrors the RHA Job Card Pad ----
       conditionalPanel("input.ih_type == 'Job Card'",
@@ -1320,7 +1320,7 @@ server <- function(input, output, session) {
                                      placeholder = "e.g. tread depths, tyre age (DOT) codes, anything replaced", rows = 2),
                        textAreaInput("ts_defects", "Defects/Items Requiring Attention", rows = 2,
                                      placeholder = "Optional - only needed if something's unticked above"),
-                       textInput("ts_rectified_by", "Rectified By", placeholder = "Optional")
+                       textAreaInput("ts_rectified_by", "Rectified By", placeholder = "Optional", rows = 2)
       ),
       hr(),
       p(class = "text-muted mb-1", "Optional, applies to any entry type."),
@@ -1646,6 +1646,14 @@ server <- function(input, output, session) {
         column(4, textInput("if_location", "Location", value = g("Location"), placeholder = "e.g. Yard, Hawick")),
         column(4, textInput("if_hours", "Hours", value = g("Hours"), placeholder = "e.g. 1250"))
       ),
+      # Only relevant when editing an existing item (a brand new item
+      # has no history yet) - appears as soon as the Driver field is
+      # actually changed from what it was, so it's not clutter for
+      # every other field on the form.
+      if (!is.null(prefill)) conditionalPanel(
+        condition = paste0("input.if_driver !== '", js_escape_sq(g("Driver")), "'"),
+        checkboxInput("if_log_driver_history", "Also log this as a new \"Driver Assigned\" history entry", value = TRUE)
+      ),
       fluidRow(
         column(4, textInput("if_datepurch", "Date Purchased", value = g("DatePurchased"), placeholder = "DD/MM/YY")),
         column(4, textInput("if_warranty", "Warranty End Date", value = g("WarrantyEndDate"), placeholder = "DD/MM/YY")),
@@ -1717,12 +1725,22 @@ server <- function(input, output, session) {
       iid <- editing_item()
       keep_cols <- c("ItemID", "Gang")
       existing <- df[df$ItemID == iid, keep_cols]
+      old_driver_val <- trimws(df$Driver[df$ItemID == iid][1])
       row_data$ItemID <- existing$ItemID
       row_data$Gang <- existing$Gang
       df <- df[df$ItemID != iid, ]
       df <- bind_rows(df, row_data)
       showNotification("Item updated.", type = "message")
       log_notification(paste0("Updated plant item ", item_identifier(row_data)))
+      # Only the edit form has if_log_driver_history (Add New Item
+      # doesn't render it) - box only shows once Driver's actually
+      # been changed, and only logs if it's still ticked and the new
+      # value isn't blank, so unticking or clearing it back out
+      # doesn't leave a stray entry.
+      new_driver_val <- trimws(input$if_driver)
+      if (isTRUE(input$if_log_driver_history) && new_driver_val != "" && !identical(old_driver_val, new_driver_val)) {
+        log_driver_assigned_entries(iid, new_driver_val)
+      }
     }
     inventory_data(df)
     editing_item(NULL)
@@ -1992,6 +2010,27 @@ server <- function(input, output, session) {
     gm <- bind_rows(gm, data.frame(Gang = name, Ganger = ganger, Location = trimws(location), stringsAsFactors = FALSE))
     gang_meta(gm)
   }
+  # Logs a "Driver Assigned" Plant History entry for each item id
+  # whose Driver actually changed to this ganger - shared by the
+  # single gang sheet Create/Edit flows below so filling in Plant
+  # Whereabouts leaves the same audit trail as assigning a driver
+  # directly from an item's own history. Reserves a block of entry
+  # ids up front rather than calling next_entry_id() per row, since
+  # that only reflects plant_history() as of before this call and
+  # would hand out duplicate ids across a loop.
+  log_driver_assigned_entries <- function(ids, ganger) {
+    if (length(ids) == 0) return(invisible())
+    existing_nums <- suppressWarnings(as.integer(gsub("HIST-", "", plant_history()$EntryID)))
+    existing_nums <- existing_nums[!is.na(existing_nums)]
+    start_n <- if (length(existing_nums) == 0) 1 else max(existing_nums) + 1
+    new_entries <- lapply(seq_along(ids), function(idx) {
+      data.frame(ItemID = ids[idx], DateTime = format(Sys.time(), "%Y-%m-%d %H:%M"),
+                 EntryType = "Driver Assigned", Description = ganger, RecordedBy = user_name(),
+                 InvoiceID = NA_character_, EntryID = sprintf("HIST-%04d", start_n + idx - 1), LinkedEntryID = NA_character_,
+                 stringsAsFactors = FALSE)
+    })
+    plant_history(bind_rows(plant_history(), do.call(rbind, new_entries)))
+  }
   observeEvent(input$gang_form_submit_new, {
     name <- trimws(input$gang_form_name)
     req(name, name != "")
@@ -1999,6 +2038,7 @@ server <- function(input, output, session) {
     ticked <- collect_ticked_items()
     ganger <- trimws(input$gang_form_ganger)
     df <- inventory_data()
+    old_driver <- setNames(df$Driver, df$ItemID)
     df$Gang[df$ItemID %in% ticked] <- name
     # Driver mirrors the gang's Ganger - plant assigned to this gang
     # is being driven/run by whoever's the Ganger, so keep Driver in
@@ -2013,6 +2053,10 @@ server <- function(input, output, session) {
     inventory_data(df)
     gang_list(c(gang_list(), name))
     save_gang_meta(name, ganger, input$gang_form_location)
+    if (ganger != "") {
+      driver_changed <- ticked[vapply(ticked, function(id) !identical(trimws(old_driver[[id]]), ganger), logical(1))]
+      log_driver_assigned_entries(driver_changed, ganger)
+    }
     removeModal()
     showNotification(paste0("Gang sheet '", name, "' created with ", length(ticked), " item(s)."), type = "message")
     log_notification(paste0("Created gang sheet '", name, "' with ", length(ticked), " item(s)"))
@@ -2022,6 +2066,7 @@ server <- function(input, output, session) {
     ticked <- collect_ticked_items()
     ganger <- trimws(input$gang_form_ganger_edit)
     df <- inventory_data()
+    old_driver <- setNames(df$Driver, df$ItemID)
     df$Gang[df$Gang == name & !(df$ItemID %in% ticked)] <- ""
     df$Gang[df$ItemID %in% ticked] <- name
     # Keep Driver in sync with the gang's Ganger for whatever's
@@ -2035,6 +2080,10 @@ server <- function(input, output, session) {
     if (location_edit != "") df$Location[df$ItemID %in% ticked] <- location_edit
     inventory_data(df)
     save_gang_meta(name, ganger, input$gang_form_location_edit)
+    if (ganger != "") {
+      driver_changed <- ticked[vapply(ticked, function(id) !identical(trimws(old_driver[[id]]), ganger), logical(1))]
+      log_driver_assigned_entries(driver_changed, ganger)
+    }
     removeModal(); editing_gang(NULL)
     showNotification(paste0("Gang sheet '", name, "' updated."), type = "message")
     log_notification(paste0("Updated gang sheet '", name, "' (", length(ticked), " item(s) assigned)"))
