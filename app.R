@@ -1280,12 +1280,22 @@ server <- function(input, output, session) {
       # an N/A rating alongside Serviceable, the numbered Fault Details
       # table, tyre tread/pressures, and inspector/supervisor sign-off.
       conditionalPanel("input.ih_type == 'Service Inspection'",
+                       h5("Machine"),
+                       p(class = "text-muted mb-1", "Defaults to the item you're viewing - change these if the inspection is actually for a different machine. Whatever's picked here is the item the entry gets filed against."),
+                       fluidRow(
+                         column(4, selectInput("sv_category", "Category *", choices = CATEGORY_OPTIONS, selected = cur_cat)),
+                         column(4, selectizeInput("sv_subcategory", "Sub-Category *", choices = cur_subs, selected = cur_sub)),
+                         column(4, selectizeInput("sv_item", "PMK Number/Reg/Serial *", choices = cur_items, selected = cur_item_id,
+                                                  options = list(create = TRUE)))
+                       ),
+                       hr(),
                        h5("Inspection Details"),
                        fluidRow(
                          column(6, dateInput("sv_outward_date", "Outward Inspection Date", value = Sys.Date())),
                          column(6, dateInput("sv_inward_date", "Inward Inspection Date", value = Sys.Date()))
                        ),
-                       # Pre-filled from the item's inventory record - all three are
+                       # Pre-filled from the picked item's inventory record (and
+                       # re-filled if the picker above is changed) - all three stay
                        # editable in case the paper form says something different.
                        fluidRow(
                          column(4, textInput("sv_fleet_chassis", "Fleet/Chassis Number",
@@ -1440,6 +1450,30 @@ server <- function(input, output, session) {
     items <- items_for_picker(input$jc_category, input$jc_subcategory, inventory_data())
     updateSelectizeInput(session, "jc_item", choices = items)
   }, ignoreInit = TRUE)
+  # Same cascade for the Service Inspection machine picker.
+  observeEvent(input$sv_category, {
+    subs <- subcats_for(input$sv_category, inventory_data())
+    updateSelectizeInput(session, "sv_subcategory", choices = subs,
+                         selected = if (length(subs) > 0) subs[1] else character(0))
+  }, ignoreInit = TRUE)
+  observeEvent(input$sv_subcategory, {
+    req(input$sv_category)
+    items <- items_for_picker(input$sv_category, input$sv_subcategory, inventory_data())
+    updateSelectizeInput(session, "sv_item", choices = items)
+  }, ignoreInit = TRUE)
+  # Picking a different machine re-fills the three ID fields from that
+  # item's inventory record, so they can't be left describing the machine
+  # that happened to be open when the form was started.
+  observeEvent(input$sv_item, {
+    req(input$sv_category, input$sv_subcategory, input$sv_item)
+    mid <- find_item_id(input$sv_category, input$sv_subcategory, input$sv_item, inventory_data())
+    if (is.na(mid)) return()
+    row <- inventory_data()[inventory_data()$ItemID == mid, ]
+    if (nrow(row) == 0) return()
+    updateTextInput(session, "sv_fleet_chassis", value = row$SerialNumber[1])
+    updateTextInput(session, "sv_plant_number", value = row$PMK_Number[1])
+    updateTextInput(session, "sv_make_type", value = row$Machine[1])
+  }, ignoreInit = TRUE)
   # Looks up the ItemID a Job Card's Category/Sub-Category/identifier
   # picker points at, so the entry files against that machine rather
   # than whichever item's page happened to be open when it was added.
@@ -1549,6 +1583,7 @@ server <- function(input, output, session) {
     tok <- sv_token()
     na_ids <- sv_na_ids()
     lines <- c(
+      paste0("Machine: ", sv_nz(input$sv_category, "-"), " > ", sv_nz(input$sv_subcategory, "-"), " > ", sv_nz(input$sv_item, "-")),
       paste0("Outward Inspection Date: ", as.character(input$sv_outward_date)),
       paste0("Inward Inspection Date: ", as.character(input$sv_inward_date)),
       paste0("Fleet/Chassis Number: ", sv_nz(input$sv_fleet_chassis, "-")),
@@ -1661,6 +1696,10 @@ server <- function(input, output, session) {
     # current item if the picker doesn't match anything.
     if (input$ih_type == "Job Card") {
       matched <- find_item_id(input$jc_category, input$jc_subcategory, input$jc_item, inventory_data())
+      if (!is.na(matched)) iid <- matched
+    }
+    if (input$ih_type == "Service Inspection") {
+      matched <- find_item_id(input$sv_category, input$sv_subcategory, input$sv_item, inventory_data())
       if (!is.na(matched)) iid <- matched
     }
     desc <- if (input$ih_type == "Driver Assigned") input$ih_driver
