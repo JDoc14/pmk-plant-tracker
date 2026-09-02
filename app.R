@@ -219,6 +219,28 @@ SERVICE_CHECKLIST <- list(
   "Suspension" = c("Springs/Shock Absorbers", "Attachment of Units/Bump Stops U/Bolts"),
   "Attachments/Rammer" = c("Bucket/Safety Pins/Oil Leaks", "Warning Notices")
 )
+# Flat 1-22 view of SERVICE_CHECKLIST, so each item has a stable number,
+# a unique id (item text alone isn't unique - "Condition/Corrosion/Nuts/
+# Bolts" is both 16 under Chassis and 17 under Brakes) and a display
+# label. Used by the Non Applicable picker and the per-item defect boxes.
+SERVICE_CHECKLIST_FLAT <- local({
+  out <- list(); n <- 0
+  for (sec in names(SERVICE_CHECKLIST)) {
+    for (it in SERVICE_CHECKLIST[[sec]]) {
+      n <- n + 1
+      out[[length(out) + 1]] <- list(
+        n = n, section = sec, item = it,
+        id = paste0(make.names(sec), "__", n),
+        long_label = paste0(n, ". ", sec, " - ", it)
+      )
+    }
+  }
+  out
+})
+SERVICE_ITEM_CHOICES <- setNames(
+  vapply(SERVICE_CHECKLIST_FLAT, function(x) x$id, character(1)),
+  vapply(SERVICE_CHECKLIST_FLAT, function(x) x$long_label, character(1))
+)
 # Matches the Logistics UK "Maintenance Inspection - Motor Vehicles" pad -
 # a separate, much longer checklist from Form 32 above, used for the
 # 6-weekly HGV/truck safety inspection rather than plant/trailer.
@@ -1231,6 +1253,9 @@ server <- function(input, output, session) {
     existing_entries <- plant_history()[plant_history()$ItemID == iid & !is.na(plant_history()$EntryID) & plant_history()$EntryID != "", ]
     link_choices <- if (nrow(existing_entries) == 0) c("None" = "") else
       c("None" = "", setNames(existing_entries$EntryID, paste0(existing_entries$EntryType, " - ", existing_entries$DateTime)))
+    # Fresh Form 32 state - bumping the token gives this inspection its own
+    # per-item defect/fault input ids, so nothing carries over from the last one.
+    sv_open(TRUE); sv_ready(FALSE); sv_fault_n(1); sv_token(sv_token() + 1)
     removeModal()  # ensure any stale modal is torn down before opening a new one
     showModal(modalDialog(
       title = paste("Add Entry -", iid), size = "l",
@@ -1249,17 +1274,38 @@ server <- function(input, output, session) {
                                         numericInput("ih_sub_amount", "Amount (£) *", value = NA)
                        )
       ),
-      # ---- Service Inspection: mirrors Form 32 ----
+      # ---- Service Inspection: mirrors Form 32, Issue B (Sept 2026) ----
+      # The 22 checklist items are unchanged from Issue A. What Issue B
+      # added: the header ID block, per-item Defects Found/Rectified By,
+      # an N/A rating alongside Serviceable, the numbered Fault Details
+      # table, tyre tread/pressures, and inspector/supervisor sign-off.
       conditionalPanel("input.ih_type == 'Service Inspection'",
+                       h5("Inspection Details"),
                        fluidRow(
-                         column(6, textInput("sv_next_due", "Next Inspection Due", placeholder = "e.g. March 2026")),
+                         column(6, dateInput("sv_outward_date", "Outward Inspection Date", value = Sys.Date())),
+                         column(6, dateInput("sv_inward_date", "Inward Inspection Date", value = Sys.Date()))
+                       ),
+                       # Pre-filled from the item's inventory record - all three are
+                       # editable in case the paper form says something different.
+                       fluidRow(
+                         column(4, textInput("sv_fleet_chassis", "Fleet/Chassis Number",
+                                             value = if (nrow(cur_row) > 0) cur_row$SerialNumber[1] else "")),
+                         column(4, textInput("sv_plant_number", "PMK Plant Number",
+                                             value = if (nrow(cur_row) > 0) cur_row$PMK_Number[1] else "")),
+                         column(4, textInput("sv_make_type", "Make & Type",
+                                             value = if (nrow(cur_row) > 0) cur_row$Machine[1] else ""))
+                       ),
+                       fluidRow(
+                         column(6, textInput("sv_next_due", "Next Service/Inspection Due", placeholder = "e.g. March 2026")),
                          column(6, textInput("sv_reviewed_by", "Reviewed By"))
                        ),
                        fluidRow(
-                         column(6, dateInput("sv_date_in", "Date In", value = Sys.Date())),
-                         column(6, dateInput("sv_date_out", "Date Out", value = Sys.Date()))
+                         column(6, dateInput("sv_date_in", "Date In Workshop", value = Sys.Date())),
+                         column(6, dateInput("sv_date_out", "Date Out Workshop", value = Sys.Date()))
                        ),
-                       p(class = "text-muted", "Everything defaults to serviceable - untick anything that failed or needs attention."),
+                       hr(),
+                       h5("Checklist"),
+                       p(class = "text-muted", "Everything defaults to serviceable (S) - untick anything needing repair (R). Use the Non Applicable list below for anything this machine doesn't have (N/A)."),
                        tagList(lapply(names(SERVICE_CHECKLIST), function(sec) {
                          tagList(
                            strong(sec),
@@ -1267,8 +1313,58 @@ server <- function(input, output, session) {
                                               choices = SERVICE_CHECKLIST[[sec]], selected = SERVICE_CHECKLIST[[sec]])
                          )
                        })),
-                       textAreaInput("sv_defects", "Defects Found", rows = 2, placeholder = "Optional - only needed if something's unticked above"),
-                       textAreaInput("sv_rectified_by", "Rectified By", placeholder = "Optional", rows = 2)
+                       selectizeInput("sv_na_items", "Non Applicable (N/A) - items this machine doesn't have",
+                                      choices = SERVICE_ITEM_CHOICES, multiple = TRUE,
+                                      options = list(placeholder = "Leave blank unless something doesn't apply")),
+                       # Appears only for items actually marked for repair - see
+                       # output$sv_defect_boxes. Keeps the form short when nothing's wrong.
+                       uiOutput("sv_defect_boxes"),
+                       textAreaInput("sv_defects", "Defects Found (general)", rows = 2,
+                                     placeholder = "Optional - anything not tied to one specific item above"),
+                       textAreaInput("sv_rectified_by", "Rectified By (general)", placeholder = "Optional", rows = 2),
+                       hr(),
+                       h5("Fault Details"),
+                       p(class = "text-muted", "Numbered faults, what was done about them, and who rectified them. Blank rows are ignored."),
+                       uiOutput("sv_fault_rows_ui"),
+                       div(class = "mb-2",
+                           actionButton("sv_add_fault_row", "+ Add fault row", class = "btn-outline-secondary btn-sm me-2"),
+                           actionButton("sv_remove_fault_row", "- Remove last row", class = "btn-outline-secondary btn-sm")
+                       ),
+                       hr(),
+                       h5("Tyres"),
+                       p(class = "text-muted mb-1", "Tread Depth"),
+                       fluidRow(
+                         column(4, textInput("sv_tread_1", NULL)),
+                         column(4, textInput("sv_tread_2", NULL)),
+                         column(4, textInput("sv_tread_3", NULL))
+                       ),
+                       fluidRow(
+                         column(4, textInput("sv_tread_4", NULL)),
+                         column(4, textInput("sv_tread_5", NULL)),
+                         column(4, textInput("sv_tread_6", NULL))
+                       ),
+                       p(class = "text-muted mb-1", "Pressures"),
+                       fluidRow(
+                         column(4, textInput("sv_press_1", NULL)),
+                         column(4, textInput("sv_press_2", NULL)),
+                         column(4, textInput("sv_press_3", NULL))
+                       ),
+                       fluidRow(
+                         column(4, textInput("sv_press_4", NULL)),
+                         column(4, textInput("sv_press_5", NULL)),
+                         column(4, textInput("sv_press_6", NULL))
+                       ),
+                       hr(),
+                       h5("Sign-off"),
+                       fluidRow(
+                         column(6, textInput("sv_inspector_name", "Name of Inspector")),
+                         column(6, textInput("sv_supervisor_name", "Name of Supervisor"))
+                       ),
+                       checkboxInput("sv_supervisor_confirm",
+                                     "Supervisor considers the above defects rectified satisfactorily and this machine to be in a safe condition to operate",
+                                     value = FALSE),
+                       p(class = "text-muted", style = "font-size:0.8rem;",
+                         "Note: it is always the responsibility of the Operator that the machine is in a safe condition before being used.")
       ),
       # ---- Job Card: mirrors the RHA Job Card Pad ----
       conditionalPanel("input.ih_type == 'Job Card'",
@@ -1374,26 +1470,143 @@ server <- function(input, output, session) {
     hit <- df$ItemID[normalize_ref(all_ids) == norm_target]
     if (length(hit) > 0) hit[1] else NA_character_
   }
-  build_service_desc <- function() {
-    lines <- c(
-      paste0("Next Inspection Due: ", ifelse(is.null(input$sv_next_due) || input$sv_next_due == "", "-", input$sv_next_due)),
-      paste0("Date In: ", as.character(input$sv_date_in), "  |  Date Out: ", as.character(input$sv_date_out))
+  # ---- Service Inspection (Form 32, Issue B) form state ----
+  # sv_token gives each inspection its own set of dynamically-rendered
+  # input ids. Without it, the defect/fault boxes are server-rendered (not
+  # torn down with the modal like the static inputs are) and last week's
+  # typing would still be sitting there next time the form is opened.
+  sv_open <- reactiveVal(FALSE)
+  sv_ready <- reactiveVal(FALSE)
+  sv_fault_n <- reactiveVal(1)
+  sv_token <- reactiveVal(0)
+  sv_nz <- function(x, default = "") {
+    if (is.null(x) || length(x) == 0) return(default)
+    if (is.na(x[1])) return(default)
+    as.character(x[1])
+  }
+  # An empty checkboxGroupInput reads back as NULL, which is also what it
+  # reads as before the modal's inputs have registered - so "everything in
+  # this section is unticked" and "the form isn't up yet" look identical.
+  # Once any section has reported in, we know the form is live and NULL
+  # genuinely means all-unticked.
+  observe({
+    if (!isTRUE(sv_open())) return()
+    vals <- lapply(names(SERVICE_CHECKLIST), function(sec) input[[paste0("sv_chk_", make.names(sec))]])
+    if (any(!vapply(vals, is.null, logical(1)))) sv_ready(TRUE)
+  })
+  sv_na_ids <- reactive({ if (is.null(input$sv_na_items)) character(0) else input$sv_na_items })
+  # Items marked for repair: unticked AND not marked Non Applicable.
+  # N/A wins, so flagging something as not-applicable doesn't also make it
+  # look like a failed check.
+  sv_flagged <- reactive({
+    if (!isTRUE(sv_ready())) return(list())
+    na_ids <- sv_na_ids()
+    out <- list()
+    for (e in SERVICE_CHECKLIST_FLAT) {
+      if (e$id %in% na_ids) next
+      ticked <- input[[paste0("sv_chk_", make.names(e$section))]]
+      if (!(e$item %in% ticked)) out[[length(out) + 1]] <- e
+    }
+    out
+  })
+  output$sv_defect_boxes <- renderUI({
+    flagged <- sv_flagged()
+    if (length(flagged) == 0) return(NULL)
+    tok <- sv_token()
+    tagList(
+      div(class = "alert alert-warning", style = "padding:8px 12px;",
+          paste0(length(flagged), " item(s) marked for repair - record the defect and who rectified it.")),
+      lapply(flagged, function(e) {
+        def_id <- paste0("sv_def_", tok, "_", e$n)
+        rect_id <- paste0("sv_rect_", tok, "_", e$n)
+        div(style = "border-left:3px solid #C9A227; padding-left:10px; margin-bottom:6px;",
+            strong(e$long_label),
+            fluidRow(
+              column(8, textInput(def_id, "Defects Found", value = isolate(sv_nz(input[[def_id]])))),
+              column(4, textInput(rect_id, "Rectified By", value = isolate(sv_nz(input[[rect_id]]))))
+            )
+        )
+      })
     )
-    failed <- c()
-    for (sec in names(SERVICE_CHECKLIST)) {
-      all_items <- SERVICE_CHECKLIST[[sec]]
-      ticked <- input[[paste0("sv_chk_", make.names(sec))]]
-      not_ticked <- setdiff(all_items, ticked)
-      if (length(not_ticked) > 0) failed <- c(failed, paste0(sec, ": ", paste(not_ticked, collapse = ", ")))
+  })
+  output$sv_fault_rows_ui <- renderUI({
+    n <- sv_fault_n(); tok <- sv_token()
+    tagList(lapply(seq_len(n), function(i) {
+      f_id <- paste0("sv_fault_", tok, "_", i)
+      a_id <- paste0("sv_fault_action_", tok, "_", i)
+      r_id <- paste0("sv_fault_rect_", tok, "_", i)
+      fluidRow(
+        column(1, div(style = "padding-top:32px; font-weight:600;", i)),
+        column(5, textInput(f_id, if (i == 1) "Fault Details" else NULL, value = isolate(sv_nz(input[[f_id]])))),
+        column(3, textInput(a_id, if (i == 1) "Action Taken" else NULL, value = isolate(sv_nz(input[[a_id]])))),
+        column(3, textInput(r_id, if (i == 1) "Rectified By" else NULL, value = isolate(sv_nz(input[[r_id]]))))
+      )
+    }))
+  })
+  observeEvent(input$sv_add_fault_row, { sv_fault_n(sv_fault_n() + 1) })
+  observeEvent(input$sv_remove_fault_row, { if (sv_fault_n() > 1) sv_fault_n(sv_fault_n() - 1) })
+  build_service_desc <- function() {
+    tok <- sv_token()
+    na_ids <- sv_na_ids()
+    lines <- c(
+      paste0("Outward Inspection Date: ", as.character(input$sv_outward_date)),
+      paste0("Inward Inspection Date: ", as.character(input$sv_inward_date)),
+      paste0("Fleet/Chassis Number: ", sv_nz(input$sv_fleet_chassis, "-")),
+      paste0("PMK Plant Number: ", sv_nz(input$sv_plant_number, "-")),
+      paste0("Make & Type: ", sv_nz(input$sv_make_type, "-")),
+      paste0("Next Service/Inspection Due: ", sv_nz(input$sv_next_due, "-")),
+      paste0("Date In Workshop: ", as.character(input$sv_date_in), "  |  Date Out Workshop: ", as.character(input$sv_date_out))
+    )
+    na_entries <- Filter(function(e) e$id %in% na_ids, SERVICE_CHECKLIST_FLAT)
+    flagged <- list()
+    for (e in SERVICE_CHECKLIST_FLAT) {
+      if (e$id %in% na_ids) next
+      ticked <- input[[paste0("sv_chk_", make.names(e$section))]]
+      if (!(e$item %in% ticked)) flagged[[length(flagged) + 1]] <- e
     }
-    if (length(failed) > 0) {
-      lines <- c(lines, "Items flagged (not serviceable):", paste0("  - ", failed))
+    n_total <- length(SERVICE_CHECKLIST_FLAT)
+    n_na <- length(na_entries); n_flagged <- length(flagged)
+    if (n_flagged == 0 && n_na == 0) {
+      lines <- c(lines, paste0("All ", n_total, " checklist items serviceable."))
     } else {
-      lines <- c(lines, "All 22 checklist items serviceable.")
+      lines <- c(lines, paste0("Checklist: ", n_total - n_na - n_flagged, " serviceable (S), ",
+                               n_flagged, " for repair (R), ", n_na, " non applicable (N/A), of ", n_total, "."))
     }
-    if (!is.null(input$sv_defects) && trimws(input$sv_defects) != "") lines <- c(lines, paste0("Defects Found: ", input$sv_defects))
-    if (!is.null(input$sv_rectified_by) && trimws(input$sv_rectified_by) != "") lines <- c(lines, paste0("Rectified By: ", input$sv_rectified_by))
-    if (!is.null(input$sv_reviewed_by) && trimws(input$sv_reviewed_by) != "") lines <- c(lines, paste0("Reviewed By: ", input$sv_reviewed_by))
+    if (n_flagged > 0) {
+      lines <- c(lines, "Items flagged for repair (R):")
+      for (e in flagged) {
+        lines <- c(lines, paste0("  - ", e$long_label,
+                                 " | Defect: ", sv_nz(input[[paste0("sv_def_", tok, "_", e$n)]], "-"),
+                                 " | Rectified By: ", sv_nz(input[[paste0("sv_rect_", tok, "_", e$n)]], "-")))
+      }
+    }
+    if (n_na > 0) {
+      lines <- c(lines, "Non Applicable (N/A):")
+      for (e in na_entries) lines <- c(lines, paste0("  - ", e$long_label))
+    }
+    if (trimws(sv_nz(input$sv_defects)) != "") lines <- c(lines, paste0("Defects Found (general): ", input$sv_defects))
+    if (trimws(sv_nz(input$sv_rectified_by)) != "") lines <- c(lines, paste0("Rectified By (general): ", input$sv_rectified_by))
+    fault_lines <- c()
+    for (i in seq_len(sv_fault_n())) {
+      f <- trimws(sv_nz(input[[paste0("sv_fault_", tok, "_", i)]]))
+      a <- trimws(sv_nz(input[[paste0("sv_fault_action_", tok, "_", i)]]))
+      rb <- trimws(sv_nz(input[[paste0("sv_fault_rect_", tok, "_", i)]]))
+      if (f == "" && a == "" && rb == "") next
+      fault_lines <- c(fault_lines, paste0("  ", length(fault_lines) + 1, ". ", if (f == "") "-" else f,
+                                           " | Action Taken: ", if (a == "") "-" else a,
+                                           " | Rectified By: ", if (rb == "") "-" else rb))
+    }
+    if (length(fault_lines) > 0) lines <- c(lines, "Fault Details:", fault_lines)
+    tread <- vapply(1:6, function(i) trimws(sv_nz(input[[paste0("sv_tread_", i)]])), character(1))
+    press <- vapply(1:6, function(i) trimws(sv_nz(input[[paste0("sv_press_", i)]])), character(1))
+    if (any(tread != "")) lines <- c(lines, paste0("Tyres - Tread Depth: ", paste(tread[tread != ""], collapse = ", ")))
+    if (any(press != "")) lines <- c(lines, paste0("Tyres - Pressures: ", paste(press[press != ""], collapse = ", ")))
+    if (trimws(sv_nz(input$sv_inspector_name)) != "") lines <- c(lines, paste0("Name of Inspector: ", input$sv_inspector_name))
+    if (trimws(sv_nz(input$sv_reviewed_by)) != "") lines <- c(lines, paste0("Reviewed By: ", input$sv_reviewed_by))
+    if (trimws(sv_nz(input$sv_supervisor_name)) != "") lines <- c(lines, paste0("Name of Supervisor: ", input$sv_supervisor_name))
+    if (isTRUE(input$sv_supervisor_confirm)) {
+      lines <- c(lines, "Supervisor considers the above defects rectified satisfactorily and this machine to be in a safe condition to operate.")
+    }
     paste(lines, collapse = "\n")
   }
   build_jobcard_desc <- function() {
