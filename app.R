@@ -236,10 +236,14 @@ load_initial_data <- function(seed_df, tab_name, sheet_cols) {
 #      the "sean" login:
 #        Name:  PMK_LOGIN_SEAN
 #        Value: yourNewPassword123|Admin|Full Name Here
-#   3. Do this for: PMK_LOGIN_SEAN, PMK_LOGIN_JACK,
-#      PMK_LOGIN_MECHANIC1, PMK_LOGIN_KEVIN, PMK_LOGIN_AGENT1,
-#      PMK_LOGIN_GUEST, PMK_LOGIN_EVAN. Roles are Admin / Admin /
-#      Mechanic / Boss / Agent / Guest / Plantman respectively. The
+#   3. Every PMK_LOGIN_* variable that exists becomes a login, and the
+#      part after the prefix is the username - PMK_LOGIN_SEAN is the
+#      "sean" login. Nothing is hardcoded here, so adding or removing
+#      someone is purely a variable change in Connect Cloud: add one to
+#      create a login, delete one to switch that login off. No code
+#      change and no republish needed for either.
+#      Current logins: sean (Admin), jack (Admin), kevin (Boss),
+#      evan (Plantman). The
 #      "Boss" role has the exact same access as Admin everywhere in
 #      the app. The "Plantman" role can access and edit Inventory
 #      List and Plant Whereabouts, plus just the Ganger List card on
@@ -251,10 +255,15 @@ load_initial_data <- function(seed_df, tab_name, sheet_cols) {
 # same user/password/role/name columns as before.
 # ---------------------------------------------------------------
 build_credentials_from_env <- function() {
-  users <- c("sean", "jack", "mechanic1", "kevin", "agent1", "guest", "evan")
-  rows <- lapply(users, function(u) {
-    raw <- Sys.getenv(paste0("PMK_LOGIN_", toupper(u)), unset = "")
-    if (!nzchar(raw)) return(NULL)
+  # Discovered from the environment rather than from a hardcoded list -
+  # a list here would go stale the moment someone is added or removed in
+  # Connect Cloud, and it did.
+  env <- Sys.getenv()
+  keys <- names(env)[startsWith(names(env), "PMK_LOGIN_")]
+  rows <- lapply(keys, function(k) {
+    u <- tolower(sub("^PMK_LOGIN_", "", k))
+    raw <- env[[k]]
+    if (!nzchar(u) || !nzchar(raw)) return(NULL)
     parts <- strsplit(raw, "\\|")[[1]]
     if (length(parts) < 3) return(NULL)
     data.frame(user = u, password = parts[1], role = trimws(parts[2]), name = trimws(parts[3]),
@@ -2772,7 +2781,10 @@ server <- function(input, output, session) {
         if (!is.na(row$Description) && row$Description != "") p(class = "mb-1 mt-2", em(row$Description)),
         div(
           tag_or_na("Category", row$Category), tag_or_na("Sub-Category", row$SubCategory),
-          tag_or_na("Invoice No.", row$Invoice_Number), tag_or_na("Account No.", row$Account_Number),
+          tag_or_na("Invoice No.", row$Invoice_Number),
+          # Shown only where it exists (invoices logged before the field
+          # was retired) rather than a "-" chip on every new one.
+          if (!is.na(row$Account_Number) && row$Account_Number != "") tag_or_na("Account No.", row$Account_Number),
           tag_or_na("Document No.", row$Document_Number), tag_or_na("SPEN/Order No.", row$SPEN_Order_Number),
           tag_or_na("Logged By", row$LoggedBy)
         )
@@ -2817,12 +2829,18 @@ server <- function(input, output, session) {
                      options = list(create = TRUE, placeholder = "Pick the item, or type a reference if it isn't in the system yet")),
       hr(),
       p(class = "text-muted", "Everything below is optional."),
+      # Account Number is deliberately NOT captured here. It's a property
+      # of the supplier, not of each invoice - the same number repeated on
+      # every row from that company - so recording it per invoice stored
+      # the one semi-sensitive field on this form hundreds of times over
+      # for no extra information. The column is kept (see invoices_seed)
+      # so everything already recorded is preserved and still exports;
+      # it's just no longer collected or added to.
       fluidRow(
         column(6, textInput("ni_invoice_number", "Invoice Number", value = g("Invoice_Number"))),
-        column(6, textInput("ni_account_number", "Account Number", value = g("Account_Number")))
+        column(6, textInput("ni_document_number", "Document Number", value = g("Document_Number")))
       ),
       fluidRow(
-        column(6, textInput("ni_document_number", "Document Number", value = g("Document_Number"))),
         column(6, textInput("ni_spen", "SPEN/Order Number", value = g("SPEN_Order_Number")))
       ),
       textAreaInput("ni_description", "Description", value = g("Description"), rows = 3)
@@ -2884,7 +2902,10 @@ server <- function(input, output, session) {
       InvoiceID = this_id,
       Company = company,
       Invoice_Number = input$ni_invoice_number,
-      Account_Number = input$ni_account_number,
+      # Carried through untouched from the existing row (blank for new
+      # invoices) - the form no longer offers it, but editing an old
+      # invoice must not quietly wipe what's already there.
+      Account_Number = if (nrow(prior_row) > 0 && !is.na(prior_row$Account_Number[1])) prior_row$Account_Number[1] else "",
       Document_Number = input$ni_document_number,
       Date = as.character(input$ni_date),
       Amount = input$ni_amount,
@@ -2920,7 +2941,6 @@ server <- function(input, output, session) {
         paste0("Item: ", input$ni_category, " > ", input$ni_subcategory, " > ", reference)
       )
       if (!is.null(input$ni_invoice_number) && trimws(input$ni_invoice_number) != "") inv_desc_lines <- c(inv_desc_lines, paste0("Invoice Number: ", trimws(input$ni_invoice_number)))
-      if (!is.null(input$ni_account_number) && trimws(input$ni_account_number) != "") inv_desc_lines <- c(inv_desc_lines, paste0("Account Number: ", trimws(input$ni_account_number)))
       if (!is.null(input$ni_document_number) && trimws(input$ni_document_number) != "") inv_desc_lines <- c(inv_desc_lines, paste0("Document Number: ", trimws(input$ni_document_number)))
       if (!is.null(input$ni_spen) && trimws(input$ni_spen) != "") inv_desc_lines <- c(inv_desc_lines, paste0("SPEN/Order Number: ", trimws(input$ni_spen)))
       if (!is.null(input$ni_description) && trimws(input$ni_description) != "") inv_desc_lines <- c(inv_desc_lines, paste0("Description: ", trimws(input$ni_description)))
