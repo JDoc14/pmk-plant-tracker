@@ -115,6 +115,102 @@ sync_to_sheets <- function(df, tab_name) {
 # data even though the Sheet still has everything). Falls back to
 # the local CSV seed (inventory only) if Sheets sync is off, or to
 # an empty table if a Sheets read fails (e.g. tab not created yet).
+# ---------------------------------------------------------------
+# CONCURRENT-EDIT MERGE
+# Sync used to overwrite a whole Sheet tab with this session's own
+# in-memory copy. With two people logged in at once, whoever saved last
+# silently wiped anything the other had added since they logged in - no
+# error, no warning, and nobody notices until something's missing.
+#
+# Now every sync re-reads the tab and applies only what THIS session
+# actually changed on top of what's already there. What changed is
+# worked out by diffing the live table against a baseline snapshot
+# (taken at load, and refreshed after each successful sync) rather than
+# by asking each edit path to declare itself - so a new edit path
+# physically cannot forget to opt in, which is the failure mode a
+# hand-maintained dirty-list would have had.
+#
+# Two people editing DIFFERENT rows now both keep their work. Two people
+# editing the SAME row is still last-writer-wins, but only for that one
+# row instead of the entire table.
+#
+# These three are deliberately pure functions of their arguments (no
+# Sheets calls, no reactives) so the merge logic can be tested directly.
+# ---------------------------------------------------------------
+row_signature <- function(df) {
+  if (nrow(df) == 0) return(character(0))
+  do.call(paste, c(lapply(df, as.character), sep = "\r"))
+}
+# Keys whose row is new or altered since the baseline, and keys the
+# baseline had that have since been deleted here.
+diff_keys <- function(local_df, baseline_df, key_col) {
+  lk <- as.character(local_df[[key_col]])
+  bk <- as.character(baseline_df[[key_col]])
+  ls <- row_signature(local_df)
+  bs <- row_signature(baseline_df); names(bs) <- bk
+  is_new <- !(lk %in% bk)
+  # bs[lk] is NA for new keys, but is_new is already TRUE there and
+  # TRUE || NA is TRUE, so no NA survives into the result.
+  altered <- is_new | (ls != bs[lk])
+  list(touched = unique(lk[altered]), deleted = setdiff(bk, lk))
+}
+# Keyed tables (Inventory, Invoices, Plant History, GangMeta): remote
+# wins for every row this session didn't touch.
+merge_rows <- function(remote_df, local_df, baseline_df, key_col) {
+  d <- diff_keys(local_df, baseline_df, key_col)
+  keep <- !(as.character(remote_df[[key_col]]) %in% c(d$touched, d$deleted))
+  mine <- local_df[as.character(local_df[[key_col]]) %in% d$touched, , drop = FALSE]
+  out <- dplyr::bind_rows(remote_df[keep, , drop = FALSE], mine)
+  if (nrow(out) > 0) out <- out[order(as.character(out[[key_col]])), , drop = FALSE]
+  rownames(out) <- NULL
+  list(df = out, changed = length(d$touched) > 0 || length(d$deleted) > 0)
+}
+# Append-only tables (Notifications): nothing is ever edited or removed,
+# so anything this session added that isn't upstream yet gets appended.
+merge_append <- function(remote_df, local_df, baseline_df) {
+  added <- local_df[!(row_signature(local_df) %in% row_signature(baseline_df)), , drop = FALSE]
+  extra <- added[!(row_signature(added) %in% row_signature(remote_df)), , drop = FALSE]
+  out <- dplyr::bind_rows(remote_df, extra)
+  rownames(out) <- NULL
+  list(df = out, changed = nrow(extra) > 0)
+}
+# Plain name lists (Gangers, Companies): apply this session's additions
+# and removals to whatever the Sheet currently holds.
+merge_names <- function(remote_names, local_names, baseline_names) {
+  added <- setdiff(local_names, baseline_names)
+  removed <- setdiff(baseline_names, local_names)
+  out <- sort(unique(c(setdiff(remote_names, removed), added)))
+  list(names = out, changed = length(added) > 0 || length(removed) > 0)
+}
+# Reads one tab, normalised to the expected columns. Returns an empty
+# frame if the tab simply doesn't exist yet (first run), and NULL if the
+# read genuinely failed - the caller must NOT write in that case, since
+# merging against a blank would delete everyone else's rows.
+read_sheet_tab <- function(tab_name, cols) {
+  out <- tryCatch(
+    googlesheets4::read_sheet(SHEETS_SPREADSHEET_ID, sheet = tab_name, col_types = "c"),
+    error = function(e) e
+  )
+  if (inherits(out, "condition")) {
+    nms <- tryCatch(googlesheets4::sheet_names(SHEETS_SPREADSHEET_ID), error = function(e) NULL)
+    if (!is.null(nms) && !(tab_name %in% nms)) {
+      return(setNames(as.data.frame(matrix(character(0), ncol = length(cols)),
+                                    stringsAsFactors = FALSE), cols))
+    }
+    message("Sheets read (", tab_name, ") failed: ", conditionMessage(out))
+    return(NULL)
+  }
+  out <- as.data.frame(out, stringsAsFactors = FALSE)
+  for (col in cols) if (!col %in% names(out)) out[[col]] <- ""
+  out <- out[, cols, drop = FALSE]
+  out[is.na(out)] <- ""
+  out
+}
+normalise_invoice_amounts <- function(df) {
+  df$Amount <- suppressWarnings(as.numeric(df$Amount))
+  df$Amount[is.na(df$Amount)] <- 0
+  df
+}
 load_initial_data <- function(seed_df, tab_name, sheet_cols) {
   if (SHEETS_SYNC_ENABLED) {
     out <- tryCatch(googlesheets4::read_sheet(SHEETS_SPREADSHEET_ID, sheet = tab_name, col_types = "c"), error = function(e) NULL)
@@ -686,10 +782,29 @@ server <- function(input, output, session) {
     d
   })
   # ---- Google Sheets sync ----
-  # One-way, app -> Sheet. Debounced so a burst of edits (e.g.
-  # ticking 10 gang checkboxes) becomes one write, not ten.
+  # Debounced so a burst of edits (e.g. ticking 10 gang checkboxes)
+  # becomes one sync, not ten. Each sync re-reads its tab and merges this
+  # session's changes into it rather than overwriting the whole thing -
+  # see the CONCURRENT-EDIT MERGE notes at the top of this file.
   sheets_last_synced <- reactiveVal(NULL)
   sheets_last_error <- reactiveVal(NULL)
+  # What the Sheet held as of this session's load, and after each
+  # successful sync. Diffing the live table against this is how the app
+  # knows which rows are ours to push.
+  #
+  # Note these are set to OUR table after a sync, not to the merged
+  # result. That's deliberate: rows other people added are then in
+  # neither our table nor our baseline, so we never claim them as ours
+  # and never report them as deleted. The trade-off is that this session
+  # won't see their rows until it reloads - stale view, but no data loss,
+  # which is the right way round.
+  inventory_baseline <- reactiveVal(inventory_loaded)
+  invoices_baseline <- reactiveVal(invoices_loaded)
+  history_baseline <- reactiveVal(plant_history_loaded)
+  gang_meta_baseline <- reactiveVal(gang_meta_loaded)
+  notifications_baseline <- reactiveVal(notifications_loaded)
+  ganger_baseline <- reactiveVal(sort(unique(gangers_loaded$Name[gangers_loaded$Name != ""])))
+  company_baseline <- reactiveVal(sort(unique(companies_loaded$Name[companies_loaded$Name != ""])))
   inventory_debounced <- debounce(inventory_data, 4000)
   invoices_debounced <- debounce(invoices_data, 4000)
   history_debounced <- debounce(plant_history, 4000)
@@ -697,54 +812,99 @@ server <- function(input, output, session) {
   company_debounced <- debounce(company_list, 4000)
   gang_meta_debounced <- debounce(gang_meta, 4000)
   notifications_debounced <- debounce(notifications_log, 4000)
-  run_full_sync <- function() {
-    ok <- c(
-      sync_to_sheets(inventory_data(), "Inventory"),
-      sync_to_sheets(invoices_data(), "Invoices"),
-      sync_to_sheets(plant_history(), "Plant History"),
-      sync_to_sheets(data.frame(Name = ganger_list(), stringsAsFactors = FALSE), "Gangers"),
-      sync_to_sheets(data.frame(Name = company_list(), stringsAsFactors = FALSE), "Companies"),
-      sync_to_sheets(gang_meta(), "GangMeta"),
-      sync_to_sheets(notifications_log(), "Notifications")
-    )
-    if (all(ok)) { sheets_last_synced(Sys.time()); sheets_last_error(NULL) }
-    else sheets_last_error(paste0("Sync failed at ", format(Sys.time(), "%H:%M:%S"), " - check the R console for details."))
+  sheets_write_ok <- function(df, tab_name, label) {
+    ok <- sync_to_sheets(df, tab_name)
+    if (!isTRUE(ok)) {
+      sheets_last_error(paste0(label, " sync failed at ", format(Sys.time(), "%H:%M:%S"),
+                               " - your changes are still here in the app and will retry on the next edit."))
+      return(FALSE)
+    }
+    sheets_last_synced(Sys.time()); sheets_last_error(NULL)
+    TRUE
   }
-  observeEvent(inventory_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(inventory_debounced(), "Inventory")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Inventory sync failed at ", format(Sys.time(), "%H:%M:%S")))
-  }, ignoreInit = TRUE)
-  observeEvent(invoices_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(invoices_debounced(), "Invoices")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Invoices sync failed at ", format(Sys.time(), "%H:%M:%S")))
-  }, ignoreInit = TRUE)
-  observeEvent(history_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(history_debounced(), "Plant History")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Plant History sync failed at ", format(Sys.time(), "%H:%M:%S")))
-  }, ignoreInit = TRUE)
+  # A failed READ must never fall through to a write: merging against a
+  # blank would hand back an empty tab and delete everyone's data. Skip,
+  # surface it, and let the next edit retry.
+  sheets_read_failed <- function(label) {
+    sheets_last_error(paste0(label, " sync skipped at ", format(Sys.time(), "%H:%M:%S"),
+                             " - couldn't read the Sheet, so nothing was overwritten. It'll retry on the next edit."))
+    invisible(FALSE)
+  }
+  sync_keyed <- function(tab_name, cols, key_col, local_df, baseline_rv,
+                         normalise = identity, label = tab_name) {
+    if (!SHEETS_SYNC_ENABLED) return(invisible(NULL))
+    remote <- read_sheet_tab(tab_name, cols)
+    if (is.null(remote)) return(sheets_read_failed(label))
+    m <- merge_rows(normalise(remote), local_df, baseline_rv(), key_col)
+    if (m$changed && !sheets_write_ok(normalise(m$df), tab_name, label)) return(invisible(FALSE))
+    baseline_rv(local_df)
+    invisible(TRUE)
+  }
+  sync_name_list <- function(tab_name, local_names, baseline_rv, label = tab_name) {
+    if (!SHEETS_SYNC_ENABLED) return(invisible(NULL))
+    remote <- read_sheet_tab(tab_name, c("Name"))
+    if (is.null(remote)) return(sheets_read_failed(label))
+    remote_names <- sort(unique(remote$Name[!is.na(remote$Name) & remote$Name != ""]))
+    m <- merge_names(remote_names, local_names, baseline_rv())
+    if (m$changed && !sheets_write_ok(data.frame(Name = m$names, stringsAsFactors = FALSE), tab_name, label)) {
+      return(invisible(FALSE))
+    }
+    baseline_rv(local_names)
+    invisible(TRUE)
+  }
+  sync_notifications <- function(local_df) {
+    if (!SHEETS_SYNC_ENABLED) return(invisible(NULL))
+    cols <- c("Time", "User", "Role", "Action")
+    remote <- read_sheet_tab("Notifications", cols)
+    if (is.null(remote)) return(sheets_read_failed("Notifications"))
+    m <- merge_append(remote, local_df, notifications_baseline())
+    if (m$changed && !sheets_write_ok(m$df, "Notifications", "Notifications")) return(invisible(FALSE))
+    notifications_baseline(local_df)
+    invisible(TRUE)
+  }
+  sync_inventory_now <- function() {
+    sync_keyed("Inventory", inventory_cols, "ItemID", inventory_data(), inventory_baseline)
+  }
+  sync_invoices_now <- function() {
+    sync_keyed("Invoices", names(invoices_seed), "InvoiceID", invoices_data(), invoices_baseline,
+               normalise = normalise_invoice_amounts)
+  }
+  sync_history_now <- function() {
+    sync_keyed("Plant History", names(plant_history_seed), "EntryID", plant_history(), history_baseline,
+               label = "Plant History")
+  }
+  sync_gang_meta_now <- function() {
+    sync_keyed("GangMeta", c("Gang", "Ganger", "Location"), "Gang", gang_meta(), gang_meta_baseline,
+               label = "Gang sheet details")
+  }
+  run_full_sync <- function() {
+    res <- c(
+      sync_inventory_now(),
+      sync_invoices_now(),
+      sync_history_now(),
+      sync_name_list("Gangers", ganger_list(), ganger_baseline, "Ganger list"),
+      sync_name_list("Companies", company_list(), company_baseline, "Company list"),
+      sync_gang_meta_now(),
+      sync_notifications(notifications_log())
+    )
+    # Having nothing to push is a successful check, not a failure - stamp
+    # the time and clear any stale error so "Sync Now" doesn't keep
+    # reporting a problem that's already been resolved.
+    if (length(res) == 0 || all(res)) {
+      sheets_last_synced(Sys.time()); sheets_last_error(NULL)
+    }
+  }
+  observeEvent(inventory_debounced(), { sync_inventory_now() }, ignoreInit = TRUE)
+  observeEvent(invoices_debounced(), { sync_invoices_now() }, ignoreInit = TRUE)
+  observeEvent(history_debounced(), { sync_history_now() }, ignoreInit = TRUE)
+  observeEvent(gang_meta_debounced(), { sync_gang_meta_now() }, ignoreInit = TRUE)
   observeEvent(ganger_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(data.frame(Name = ganger_debounced(), stringsAsFactors = FALSE), "Gangers")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Ganger list sync failed at ", format(Sys.time(), "%H:%M:%S")))
+    sync_name_list("Gangers", ganger_debounced(), ganger_baseline, "Ganger list")
   }, ignoreInit = TRUE)
   observeEvent(company_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(data.frame(Name = company_debounced(), stringsAsFactors = FALSE), "Companies")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Company list sync failed at ", format(Sys.time(), "%H:%M:%S")))
+    sync_name_list("Companies", company_debounced(), company_baseline, "Company list")
   }, ignoreInit = TRUE)
-  observeEvent(notifications_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(notifications_debounced(), "Notifications")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Notifications sync failed at ", format(Sys.time(), "%H:%M:%S")))
-  }, ignoreInit = TRUE)
-  observeEvent(gang_meta_debounced(), {
-    if (!SHEETS_SYNC_ENABLED) return()
-    ok <- sync_to_sheets(gang_meta_debounced(), "GangMeta")
-    if (ok) sheets_last_synced(Sys.time()) else sheets_last_error(paste0("Gang sheet details sync failed at ", format(Sys.time(), "%H:%M:%S")))
-  }, ignoreInit = TRUE)
+  observeEvent(notifications_debounced(), { sync_notifications(notifications_debounced()) }, ignoreInit = TRUE)
   next_item_id <- function() {
     ids <- inventory_data()$ItemID
     nums <- suppressWarnings(as.integer(gsub("ITEM-", "", ids)))
