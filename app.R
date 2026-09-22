@@ -424,6 +424,17 @@ floor_to_monday <- function(d) { d - (as.integer(format(d, "%u")) - 1) }
 # delimited by single quotes (used for the Delete links' onclick=
 # handlers below) - without this, a name like "Charlie O'Donnel"
 # breaks the embedded JavaScript and makes that Delete link a no-op.
+# strwrap() treats a single "\n" as ordinary whitespace, so multi-line
+# history descriptions (every Service Inspection, Job Card etc) came out
+# of the PDF as one run-on paragraph. This keeps each line on its own
+# line and only wraps the ones that are too long.
+wrap_lines <- function(x, width) {
+  if (is.na(x) || x == "") return(character(0))
+  unlist(lapply(strsplit(x, "\n", fixed = TRUE)[[1]], function(l) {
+    w <- strwrap(l, width = width)
+    if (length(w) == 0) "" else w
+  }))
+}
 js_escape_sq <- function(x) gsub("'", "\\\\'", x, fixed = TRUE)
 # ---------------------------------------------------------------
 # COMPANY LIST - suppliers/garages used for the invoice Company
@@ -547,7 +558,10 @@ items_for_picker <- function(cat, subcat, df) {
   labels <- ifelse(rows$Machine != "", paste0(ids, " - ", rows$Machine), ids)
   setNames(ids, labels)
 }
-item_row <- function(row, r, clickable = TRUE, show_actions = TRUE) {
+# entry_counts: optional named integer vector (ItemID -> number of
+# History entries). When supplied, the box shows an "Entries:" line
+# alongside Driver/Location.
+item_row <- function(row, r, clickable = TRUE, show_actions = TRUE, entry_counts = NULL) {
   div(
     class = "plant-row",
     style = paste0("border-left-color:", CATEGORY_COLOUR(row$Category), ";"),
@@ -563,6 +577,8 @@ item_row <- function(row, r, clickable = TRUE, show_actions = TRUE) {
         div(class = "text-end",
             p(class = "mb-1", paste("Driver:", ifelse(row$Driver == "", "Unassigned", row$Driver))),
             if (row$Location != "") p(class = "mb-1 text-muted", style = "font-size:0.8rem;", paste("Location:", row$Location)),
+            if (!is.null(entry_counts)) p(class = "mb-1 text-muted", style = "font-size:0.8rem;",
+                                          paste("Entries:", { n <- entry_counts[row$ItemID]; if (is.na(n)) 0L else n })),
             span(class = paste0("badge ", ifelse(row$Active == "Yes", "bg-success", "bg-secondary")), row$Active),
             if (r %in% c("Admin", "Boss", "Plantman") && show_actions) div(style = "margin-top:6px;",
                                                   tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
@@ -582,7 +598,7 @@ metric_card <- function(value, label, colour = "#0B4D3A") {
       div(class = "metric-label", label)
   )
 }
-nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clickable = TRUE) {
+nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clickable = TRUE, entry_counts = NULL) {
   cat_panels <- lapply(CATEGORY_OPTIONS, function(cat) {
     cat_rows <- df[df$Category == cat, ]
     subcats <- subcats_for(cat, df)
@@ -592,7 +608,7 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
         title = paste0(sub, " (", nrow(sub_rows), ")"),
         value = paste0(cat, "___", sub),
         if (nrow(sub_rows) == 0) p(class = "text-muted mb-0", "None.")
-        else tagList(lapply(seq_len(nrow(sub_rows)), function(i) item_row(sub_rows[i, ], r, clickable = clickable, show_actions = show_actions)))
+        else tagList(lapply(seq_len(nrow(sub_rows)), function(i) item_row(sub_rows[i, ], r, clickable = clickable, show_actions = show_actions, entry_counts = entry_counts)))
       )
     })
     accordion_panel(
@@ -1307,7 +1323,7 @@ server <- function(input, output, session) {
           actionButton("inv_browse_back_sub", "< Back to Sub-Categories", class = "btn-link mb-2"),
           h5(paste0(cat, " > ", sub)),
           if (nrow(rows) == 0) div(class = "alert alert-secondary", "No items in this sub-category yet.")
-          else tagList(lapply(seq_len(nrow(rows)), function(i) item_row(rows[i, ], r, clickable = TRUE, show_actions = TRUE)))
+          else tagList(lapply(seq_len(nrow(rows)), function(i) item_row(rows[i, ], r, clickable = TRUE, show_actions = TRUE, entry_counts = history_counts())))
         )
       }
     )
@@ -1363,7 +1379,8 @@ server <- function(input, output, session) {
             column(4,
                    p(strong("Driver: "), ifelse(row$Driver == "", "Unassigned", row$Driver)),
                    p(strong("Location: "), ifelse(row$Location == "", "-", row$Location)),
-                   p(strong("Gang: "), ifelse(row$Gang == "", "Not assigned", row$Gang))
+                   p(strong("Gang: "), ifelse(row$Gang == "", "Not assigned", row$Gang)),
+                   p(strong("History Entries: "), nrow(hist))
             ),
             column(4,
                    p(strong("Date Purchased: "), ifelse(row$DatePurchased == "", "-", row$DatePurchased)),
@@ -1375,7 +1392,13 @@ server <- function(input, output, session) {
           p(strong("Notes: "), ifelse(row$Notes == "", "-", row$Notes)),
           if (r %in% c("Admin", "Boss", "Mechanic", "Plantman")) actionButton("inv_add_entry_btn", "+ Add History Entry", class = "btn-primary btn-sm")
       ),
-      h5("History"),
+      div(class = "d-flex justify-content-between align-items-center flex-wrap mb-2",
+          h5("History", class = "mb-0"),
+          if (nrow(hist) > 0) div(
+            downloadButton("item_history_csv", "Download History (CSV)", class = "btn-outline-secondary btn-sm me-2"),
+            downloadButton("item_history_pdf", "Download History (PDF)", class = "btn-outline-secondary btn-sm")
+          )
+      ),
       if (nrow(hist) == 0) div(class = "alert alert-info", "No history yet for this item.")
       else tagList(lapply(seq_len(nrow(hist)), function(i) {
         h <- hist[i, ]
@@ -2044,6 +2067,52 @@ server <- function(input, output, session) {
     removeModal()
     showNotification("Entry removed.", type = "message")
   })
+  # ---- Entry counts + per-item history download ----
+  # Named ItemID -> count, shared by every plant box so the whole list
+  # is counted once per history change rather than once per box.
+  history_counts <- reactive({
+    h <- plant_history()
+    if (nrow(h) == 0) return(setNames(integer(0), character(0)))
+    tb <- table(h$ItemID)
+    setNames(as.integer(tb), names(tb))
+  })
+  item_history_row <- reactive({
+    iid <- inv_selected(); req(iid)
+    row <- inventory_data()[inventory_data()$ItemID == iid, ]
+    req(nrow(row) > 0)
+    row[1, ]
+  })
+  item_history_export <- reactive({
+    iid <- inv_selected(); req(iid)
+    h <- plant_history()[plant_history()$ItemID == iid, , drop = FALSE]
+    h <- h[order(h$DateTime, decreasing = TRUE), , drop = FALSE]
+    data.frame(`Date/Time` = h$DateTime, Type = h$EntryType,
+               Description = ifelse(is.na(h$Description), "", h$Description),
+               `Recorded By` = h$RecordedBy, check.names = FALSE, stringsAsFactors = FALSE)
+  })
+  item_history_file_stub <- function() {
+    gsub("[^A-Za-z0-9]+", "_", item_identifier(item_history_row()))
+  }
+  output$item_history_csv <- downloadHandler(
+    filename = function() paste0("pmk_history_", item_history_file_stub(), "_", Sys.Date(), ".csv"),
+    content = function(file) write.csv(item_history_export(), file, row.names = FALSE)
+  )
+  output$item_history_pdf <- downloadHandler(
+    filename = function() paste0("pmk_history_", item_history_file_stub(), "_", Sys.Date(), ".pdf"),
+    content = function(file) {
+      row <- item_history_row()
+      pdf(file, width = 11.69, height = 8.27)  # A4 landscape, same as the full report
+      on.exit(dev.off(), add = TRUE)
+      title <- paste0(item_identifier(row), if (row$Machine != "") paste0(" - ", row$Machine) else "", " - History")
+      subtitle <- paste0(row$Category, " > ", row$SubCategory,
+                         "  |  Driver: ", if (row$Driver == "") "Unassigned" else row$Driver,
+                         "  |  ", nrow(item_history_export()), " entries",
+                         "  |  Generated ", format(Sys.time(), "%d %b %Y, %H:%M"))
+      draw_report_section(title, subtitle, item_history_export(),
+                          col_widths = c(1.2, 1.1, 5.2, 1.1), wrap_cols = "Description",
+                          wrap_chars = 105, max_weight = 30)
+    }
+  )
   # ---- Add / Edit item form ----
   item_form_ui <- function(prefill = NULL) {
     all_subcats <- sort(unique(c(unlist(SUBCATEGORY_MAP), inventory_data()$SubCategory)))
@@ -2241,7 +2310,7 @@ server <- function(input, output, session) {
                        "Delete")
             ),
             if (nrow(g_rows) == 0) p(class = "text-muted mb-0", "No plant assigned.")
-            else tagList(lapply(seq_len(nrow(g_rows)), function(i) item_row(g_rows[i, ], r, clickable = FALSE, show_actions = TRUE)))
+            else tagList(lapply(seq_len(nrow(g_rows)), function(i) item_row(g_rows[i, ], r, clickable = FALSE, show_actions = TRUE, entry_counts = history_counts())))
           )
         }
         # Group gang sheets by Location, so crews on the same site sit
@@ -2271,7 +2340,8 @@ server <- function(input, output, session) {
       {
         leftover <- df[df$Gang == "" | is.na(df$Gang), ]
         if (nrow(leftover) == 0) div(class = "alert alert-secondary", "Everything is assigned to a gang.")
-        else nested_inventory_accordion("unassigned_accordion", leftover, r, show_actions = TRUE, clickable = FALSE)
+        else nested_inventory_accordion("unassigned_accordion", leftover, r, show_actions = TRUE, clickable = FALSE,
+                                        entry_counts = history_counts())
       }
     )
   }
@@ -3085,7 +3155,7 @@ server <- function(input, output, session) {
           val <- as.character(df[i, j])
           if (is.na(val)) val <- "-"
           if (names(df)[j] %in% wrap_cols) {
-            wrapped <- strwrap(val, width = wrap_chars)
+            wrapped <- wrap_lines(val, wrap_chars)
             if (length(wrapped) == 0) wrapped <- "-"
           } else {
             wrapped <- if (nchar(val) > 40) paste0(substr(val, 1, 37), "...") else val
@@ -3151,7 +3221,7 @@ server <- function(input, output, session) {
       m <- 1
       for (cn in wrap_cols) {
         v <- as.character(df[[cn]][i])
-        if (!is.na(v)) m <- max(m, length(strwrap(v, width = wrap_chars)))
+        if (!is.na(v)) m <- max(m, length(wrap_lines(v, wrap_chars)))
       }
       m
     }, numeric(1))
@@ -3958,7 +4028,7 @@ server <- function(input, output, session) {
     tagList(
       br(),
       p(class = "text-muted",
-        "Green = Service Inspection, yellow = Job Card, pink = Mechanic Work, logged that week - split square = more than one. Last 52 weeks. ",
+        "Green = Service Inspection, yellow = Job Card, pink = Mechanic Work, logged that week - split square = more than one. Last 52 weeks. Click any coloured square to see exactly what was logged. ",
         "Shown grouped by Category/Sub-Category by default - pick a Category (and optionally Sub-Category) to narrow it down, or download the full log below."),
       fluidRow(
         column(4, selectInput("jg_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
@@ -4035,7 +4105,14 @@ server <- function(input, output, session) {
         bg <- jg_cell_style(types_present)
         title_txt <- paste0(label, " - week of ", format(wk, "%d %b %Y"),
                              if (length(types_present) > 0) paste0(" - ", paste(types_present, collapse = ", ")) else "")
-        div(title = title_txt, style = paste0("width:16px; height:16px; border-radius:3px; background:", bg, "; flex-shrink:0;"))
+        # Only squares with something logged are clickable - they open
+        # the actual entries for that item/week (see jg_cell_click).
+        has_entries <- length(types_present) > 0
+        div(title = title_txt,
+            style = paste0("width:16px; height:16px; border-radius:3px; background:", bg, "; flex-shrink:0;",
+                           if (has_entries) " cursor:pointer;" else ""),
+            onclick = if (has_entries) sprintf("Shiny.setInputValue('jg_cell_click', {item:'%s', week:'%s'}, {priority:'event'})",
+                                               js_escape_sq(row$ItemID), format(wk, "%Y-%m-%d")) else NULL)
       })
       div(style = "display:flex; align-items:center; margin-bottom:3px;",
           div(style = "width:100px; font-size:11px; font-weight:600; flex-shrink:0;", label),
@@ -4050,6 +4127,36 @@ server <- function(input, output, session) {
       row_divs
     )
   }
+  # Clicking a coloured square pops up exactly what was logged for that
+  # item that week - every Service Inspection / Job Card / Mechanic Work
+  # entry, in full, without leaving the grid.
+  observeEvent(input$jg_cell_click, {
+    cl <- input$jg_cell_click
+    req(cl$item, cl$week)
+    wk <- as.Date(cl$week)
+    ev <- jg_events()
+    hits <- if (nrow(ev) == 0) ev else ev[ev$ItemID == cl$item & !is.na(ev$Week) & ev$Week == wk, , drop = FALSE]
+    if (nrow(hits) > 0) hits <- hits[order(hits$DateTime), , drop = FALSE]
+    inv_row <- inventory_data()[inventory_data()$ItemID == cl$item, ]
+    label <- if (nrow(inv_row) > 0) item_identifier(inv_row[1, ]) else cl$item
+    machine <- if (nrow(inv_row) > 0 && inv_row$Machine[1] != "") paste0(" - ", inv_row$Machine[1]) else ""
+    removeModal()
+    showModal(modalDialog(
+      title = paste0(label, machine, " - week of ", format(wk, "%d %b %Y")),
+      size = "m", easyClose = TRUE,
+      if (nrow(hits) == 0) p(class = "text-muted", "Nothing logged for this week.")
+      else tagList(lapply(seq_len(nrow(hits)), function(i) {
+        h <- hits[i, ]
+        desc <- if (is.na(h$Description)) "" else h$Description
+        div(class = "history-item", style = paste0("border-left-color:", JG_TYPE_COLOURS[[h$EntryType]], ";"),
+            div(strong(h$EntryType), span(class = "text-muted", paste0(" - ", h$DateTime))),
+            tagList(lapply(strsplit(desc, "\n", fixed = TRUE)[[1]], function(ln) p(class = "mb-1", ln))),
+            p(class = "mb-0 text-muted", style = "font-size:0.85rem;", paste("By:", h$RecordedBy))
+        )
+      })),
+      footer = modalButton("Close")
+    ))
+  })
   output$jg_grid <- renderUI({
     weeks <- jg_weeks()
     ev <- jg_events()
