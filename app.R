@@ -319,6 +319,11 @@ CATEGORY_COLOUR <- function(cat) {
 # ---------------------------------------------------------------
 GANG_FEATURES_ENABLED <- FALSE
 ENTRY_TYPES <- c("Driver Assigned", "Hours Updated", "Damage", "Refurbished", "Mechanic Work", "Note", "Service Inspection", "Job Card", "Truck Service")
+# Everything that can actually appear in Plant History, for filtering
+# and analysis. "Invoice" isn't in ENTRY_TYPES because it's never picked
+# by hand - it's created automatically when an invoice is logged against
+# an item - but it's still a real entry type once it's there.
+ALL_ENTRY_TYPES <- sort(unique(c(ENTRY_TYPES, "Invoice")))
 # "Invoice" is deliberately NOT in this list - Invoice history entries
 # are only ever created automatically from the Add Invoice form (see
 # ni_submit), which fills in Company/Amount/etc. Exposing it as a
@@ -4052,6 +4057,26 @@ server <- function(input, output, session) {
         column(4, selectizeInput("jg_subcategory", "Sub-Category", choices = "All", selected = "All")),
         column(4, div(style = "margin-top:24px;", downloadButton("jg_download", "Download (CSV)", class = "btn-primary btn-sm")))
       ),
+      div(class = "chart-card",
+          h6("Plant with nothing logged"),
+          p(class = "text-muted mb-2",
+            "Which machines haven't been seen for a while. Pick what counts as having been seen - the same entry types the grid shows - and how far back to look."),
+          fluidRow(
+            column(4, selectizeInput("jg_ov_types", "Counts as having been seen",
+                                     choices = names(JG_TYPE_COLOURS), selected = "Service Inspection",
+                                     multiple = TRUE, options = list(placeholder = "Service Inspection"))),
+            column(3, selectInput("jg_ov_window", "Nothing logged in the last",
+                                  choices = c("6 weeks", "3 months", "6 months", "12 months", "Custom (weeks)"),
+                                  selected = "6 months")),
+            column(2, conditionalPanel("input.jg_ov_window == 'Custom (weeks)'",
+                                       numericInput("jg_ov_weeks", "Weeks", value = 26, min = 1, step = 1))),
+            column(3, div(style = "margin-top:24px;",
+                          downloadButton("jg_overdue_download", "Download (CSV)", class = "btn-primary btn-sm")))
+          ),
+          checkboxInput("jg_ov_only", "Show only these items in the grid below", value = FALSE),
+          uiOutput("jg_overdue_summary"),
+          div(style = "max-height:320px; overflow-y:auto;", tableOutput("jg_overdue_table"))
+      ),
       div(class = "chart-card", style = "overflow-x:auto;", uiOutput("jg_grid")),
       div(style = "display:flex; gap:16px; margin-top:6px; font-size:11px; color:#666; flex-wrap:wrap;",
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3E7C59;border-radius:2px;display:inline-block;"), "Service Inspection"),
@@ -4070,12 +4095,110 @@ server <- function(input, output, session) {
       updateSelectizeInput(session, "jg_subcategory", choices = c("All", subs), selected = "All")
     }
   }, ignoreInit = TRUE)
-  jg_filtered_items <- reactive({
+  # Category/Sub-Category only. This is the population the "nothing
+  # logged" check measures against, and it deliberately does NOT apply
+  # that check itself - jg_filtered_items does, and it depends on this,
+  # so putting both in one reactive would make it depend on its own
+  # result.
+  jg_base_items <- reactive({
     df <- inventory_data()
-    if (!is.null(input$jg_category) && input$jg_category != "All") df <- df[df$Category == input$jg_category, ]
-    if (!is.null(input$jg_subcategory) && input$jg_subcategory != "All") df <- df[df$SubCategory == input$jg_subcategory, ]
+    if (!is.null(input$jg_category) && input$jg_category != "All") df <- df[df$Category == input$jg_category, , drop = FALSE]
+    if (!is.null(input$jg_subcategory) && input$jg_subcategory != "All") df <- df[df$SubCategory == input$jg_subcategory, , drop = FALSE]
     natural_sort_rows(df)
   })
+  jg_filtered_items <- reactive({
+    df <- jg_base_items()
+    ids <- jg_visible_ids()
+    if (!is.null(ids)) df <- df[df$ItemID %in% ids, , drop = FALSE]
+    df
+  })
+  # ---- "Nothing logged" / not serviced ----
+  jg_ov_types <- reactive({
+    t <- input$jg_ov_types
+    if (is.null(t) || length(t) == 0) "Service Inspection" else t
+  })
+  jg_ov_days <- reactive({
+    w <- if (!is.null(input$jg_ov_window)) input$jg_ov_window else "6 months"
+    switch(w,
+           "6 weeks" = 42, "3 months" = 91, "6 months" = 182, "12 months" = 365,
+           { n <- input$jg_ov_weeks; if (is.null(n) || is.na(n) || n < 1) 182 else as.integer(n) * 7 })
+  })
+  # Active plant whose most recent entry of the chosen type(s) is older
+  # than the window - plus anything that has never had one at all, which
+  # is the case actually worth finding.
+  jg_overdue <- reactive({
+    items <- jg_base_items()
+    items <- items[items$Active == "Yes", , drop = FALSE]
+    empty <- data.frame(ItemID = character(0), Item = character(0), Machine = character(0),
+                        Category = character(0), `Sub-Category` = character(0),
+                        `Last Logged` = character(0), `Days Since` = integer(0),
+                        check.names = FALSE, stringsAsFactors = FALSE)
+    if (nrow(items) == 0) return(empty)
+    cutoff <- Sys.Date() - jg_ov_days()
+    h <- plant_history()
+    h <- h[h$EntryType %in% jg_ov_types(), , drop = FALSE]
+    if (nrow(h) > 0) {
+      h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
+      h <- h[!is.na(h$DateOnly), , drop = FALSE]
+    }
+    last_by <- if (nrow(h) == 0) setNames(as.Date(character(0)), character(0)) else
+      do.call(c, lapply(split(h$DateOnly, h$ItemID), max))
+    last_for <- function(id) if (id %in% names(last_by)) last_by[[id]] else as.Date(NA)
+    keep <- vapply(items$ItemID, function(id) { d <- last_for(id); is.na(d) || d < cutoff }, logical(1))
+    items <- items[keep, , drop = FALSE]
+    if (nrow(items) == 0) return(empty)
+    lastd <- vapply(items$ItemID, function(id) { d <- last_for(id); if (is.na(d)) NA_character_ else as.character(d) }, character(1))
+    days <- as.integer(Sys.Date() - as.Date(lastd))
+    out <- data.frame(
+      ItemID = items$ItemID,
+      Item = vapply(seq_len(nrow(items)), function(i) item_identifier(items[i, ]), character(1)),
+      Machine = ifelse(items$Machine == "", "-", items$Machine),
+      Category = items$Category,
+      `Sub-Category` = items$SubCategory,
+      `Last Logged` = ifelse(is.na(lastd), "Never", lastd),
+      # Numeric, with NA for never-logged, so it sorts as a number in the
+      # CSV rather than as text. The on-screen table renders NA as "-".
+      `Days Since` = days,
+      check.names = FALSE, stringsAsFactors = FALSE
+    )
+    # Never-logged first (they're the worst case), then longest gap down.
+    sort_key <- ifelse(is.na(days), Inf, days)
+    out <- out[order(-sort_key, out$Item), , drop = FALSE]
+    rownames(out) <- NULL
+    out
+  })
+  jg_visible_ids <- reactive({
+    if (!isTRUE(input$jg_ov_only)) return(NULL)
+    ov <- jg_overdue()
+    if (nrow(ov) == 0) character(0) else ov$ItemID
+  })
+  jg_ov_window_label <- reactive({
+    w <- if (!is.null(input$jg_ov_window)) input$jg_ov_window else "6 months"
+    if (w == "Custom (weeks)") paste0(jg_ov_days() %/% 7, " weeks") else w
+  })
+  output$jg_overdue_summary <- renderUI({
+    ov <- jg_overdue()
+    base <- jg_base_items()
+    total <- nrow(base[base$Active == "Yes", , drop = FALSE])
+    kinds <- paste(jg_ov_types(), collapse = " / ")
+    if (nrow(ov) == 0) div(class = "alert alert-success mb-2",
+      paste0("All ", total, " active item(s) have had ", kinds, " logged within the last ", jg_ov_window_label(), "."))
+    else div(class = "alert alert-warning mb-2",
+      paste0(nrow(ov), " of ", total, " active item(s) have had no ", kinds,
+             " logged in the last ", jg_ov_window_label(), "."))
+  })
+  jg_overdue_table_data <- function() {
+    ov <- jg_overdue()
+    ov[, setdiff(names(ov), "ItemID"), drop = FALSE]
+  }
+  output$jg_overdue_table <- renderTable({
+    if (nrow(jg_overdue()) == 0) return(data.frame(Message = "Nothing outstanding for these filters."))
+    jg_overdue_table_data()
+  }, na = "-")
+  output$jg_overdue_download <- downloadHandler(
+    filename = function() paste0("pmk_nothing_logged_", Sys.Date(), ".csv"),
+    content = function(file) write.csv(jg_overdue_table_data(), file, row.names = FALSE)
+  )
   jg_weeks <- reactive({
     this_week <- floor_to_monday(Sys.Date())
     rev(seq(this_week, by = "-1 week", length.out = 52))
@@ -4188,7 +4311,11 @@ server <- function(input, output, session) {
       # Default view: grouped by Category > Sub-Category, same
       # drill-down pattern as Inventory List / gang sheet forms.
       df <- inventory_data()
-      if (nrow(df) == 0) return(div(class = "alert alert-secondary", "No plant items yet."))
+      ids <- jg_visible_ids()
+      if (!is.null(ids)) df <- df[df$ItemID %in% ids, , drop = FALSE]
+      if (nrow(df) == 0) return(div(class = "alert alert-secondary",
+                                    if (is.null(ids)) "No plant items yet."
+                                    else "Nothing outstanding - no items match the 'nothing logged' filter."))
       cat_panels <- lapply(CATEGORY_OPTIONS, function(cat) {
         cat_rows <- df[df$Category == cat, ]
         subs <- subcats_for(cat, df)
@@ -4238,69 +4365,176 @@ server <- function(input, output, session) {
   plant_analysis_ui <- function(r) {
     tagList(
       br(),
-      p(class = "text-muted", "Ranks plant by activity - which items get logged against most, and which need the most Job Cards."),
-      fluidRow(
-        column(6, NULL),
-        column(6, style = "text-align:right;",
-               selectInput("pa_period", NULL, choices = c("Last 6 Weeks", "Last 6 Months"), selected = "Last 6 Weeks", width = "200px"))
+      p(class = "text-muted",
+        "Ranks plant by how much gets logged against it. Everything below follows the filters - narrow by period, category, sub-category or entry type and the tiles, both charts and the table all move together."),
+      div(class = "chart-card",
+          fluidRow(
+            column(3, selectInput("pa_period", "Period",
+                                  choices = c("Last 6 Weeks", "Last 6 Months", "Last 12 Months", "All Time", "Custom range"),
+                                  selected = "Last 6 Months")),
+            column(3, conditionalPanel(
+              "input.pa_period == 'Custom range'",
+              dateRangeInput("pa_dates", "Date range", start = Sys.Date() - 182, end = Sys.Date()))),
+            column(3, selectInput("pa_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
+            column(3, selectizeInput("pa_subcategory", "Sub-Category", choices = "All", selected = "All"))
+          ),
+          fluidRow(
+            column(6, selectizeInput("pa_types", "Entry types", choices = ALL_ENTRY_TYPES, selected = ALL_ENTRY_TYPES,
+                                     multiple = TRUE, options = list(placeholder = "All entry types"))),
+            column(3, numericInput("pa_min_jc", "Min. job cards", value = 0, min = 0, step = 1)),
+            column(3, numericInput("pa_top_n", "Show top", value = 10, min = 3, max = 50, step = 5))
+          )
       ),
+      fluidRow(
+        column(4, metric_card(textOutput("pa_n_items", inline = TRUE), "Plant Matching")),
+        column(4, metric_card(textOutput("pa_n_entries", inline = TRUE), "Entries In Period")),
+        column(4, metric_card(textOutput("pa_n_jobcards", inline = TRUE), "Job Cards In Period"))
+      ),
+      br(),
       fluidRow(
         column(6, div(class = "chart-card", h6("Most Frequent History Entries"), plotlyOutput("pa_history_plot", height = 340))),
         column(6, div(class = "chart-card", h6("Most Job Cards"), plotlyOutput("pa_jobcard_plot", height = 340)))
+      ),
+      div(class = "chart-card",
+          fluidRow(
+            column(8, h6("Every matching item, most active first")),
+            column(4, style = "text-align:right;",
+                   downloadButton("pa_download", "Download (CSV)", class = "btn-primary btn-sm"))
+          ),
+          p(class = "text-muted", style = "font-size:0.85rem;",
+            "Items with nothing logged in the period are included too - they sit at the bottom on zero, which is usually the interesting end."),
+          div(style = "max-height:420px; overflow-y:auto;", tableOutput("pa_table"))
       )
     )
   }
-  pa_period_start <- reactive({
-    period <- if (!is.null(input$pa_period)) input$pa_period else "Last 6 Weeks"
-    if (period == "Last 6 Months") Sys.Date() - 182 else Sys.Date() - 41
+  observeEvent(input$pa_category, {
+    if (is.null(input$pa_category) || input$pa_category == "All") {
+      updateSelectizeInput(session, "pa_subcategory", choices = "All", selected = "All")
+    } else {
+      subs <- subcats_for(input$pa_category, inventory_data())
+      updateSelectizeInput(session, "pa_subcategory", choices = c("All", subs), selected = "All")
+    }
+  }, ignoreInit = TRUE)
+  pa_range <- reactive({
+    period <- if (!is.null(input$pa_period)) input$pa_period else "Last 6 Months"
+    end <- Sys.Date()
+    if (period == "Custom range") {
+      req(input$pa_dates, length(input$pa_dates) == 2, !anyNA(input$pa_dates))
+      return(list(start = as.Date(input$pa_dates[1]), end = as.Date(input$pa_dates[2])))
+    }
+    start <- switch(period,
+                    "Last 6 Weeks" = end - 41,
+                    "Last 12 Months" = end - 364,
+                    "All Time" = as.Date("1900-01-01"),
+                    end - 182)
+    list(start = start, end = end)
   })
-  pa_history <- reactive({
+  # The plant the filters select - the population every count below is
+  # measured against, including the ones with nothing logged.
+  pa_items <- reactive({
+    df <- inventory_data()
+    if (!is.null(input$pa_category) && input$pa_category != "All") df <- df[df$Category == input$pa_category, , drop = FALSE]
+    if (!is.null(input$pa_subcategory) && input$pa_subcategory != "All") df <- df[df$SubCategory == input$pa_subcategory, , drop = FALSE]
+    natural_sort_rows(df)
+  })
+  # pa_history_all() is the period/plant slice WITHOUT the entry-type
+  # picker applied; pa_history() adds it. Job card counts come from the
+  # former on purpose, so unticking "Job Card" narrows the entries chart
+  # without emptying the job cards chart and the min-job-cards filter
+  # underneath it.
+  pa_history_all <- reactive({
     h <- plant_history()
     if (nrow(h) == 0) return(h)
+    rg <- pa_range()
     h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
-    h[!is.na(h$DateOnly) & h$DateOnly >= pa_period_start(), ]
+    h <- h[!is.na(h$DateOnly) & h$DateOnly >= rg$start & h$DateOnly <= rg$end, , drop = FALSE]
+    h[h$ItemID %in% pa_items()$ItemID, , drop = FALSE]
   })
-  pa_label_for_item <- function(iid, df_inv) {
-    row <- df_inv[df_inv$ItemID == iid, ]
-    if (nrow(row) == 0) return(iid)
-    id <- item_identifier(row[1, ])
-    if (row$Machine[1] != "") paste0(id, " - ", row$Machine[1]) else id
+  pa_history <- reactive({
+    h <- pa_history_all()
+    types <- input$pa_types
+    if (nrow(h) == 0 || is.null(types) || length(types) == 0) return(h)
+    h[h$EntryType %in% types, , drop = FALSE]
+  })
+  pa_count_by_item <- function(h) {
+    if (nrow(h) == 0) return(setNames(integer(0), character(0)))
+    tb <- table(h$ItemID)
+    setNames(as.integer(tb), names(tb))
   }
-  pa_all_agg <- reactive({
-    h <- pa_history()
-    empty <- data.frame(ItemID = character(0), Label = character(0), Count = integer(0), stringsAsFactors = FALSE)
-    if (nrow(h) == 0) return(empty)
-    df_inv <- inventory_data()
-    agg <- h %>% group_by(ItemID) %>% summarise(Count = n(), .groups = "drop") %>% arrange(desc(Count))
-    agg$Label <- vapply(agg$ItemID, pa_label_for_item, character(1), df_inv = df_inv)
-    agg
+  pa_top_n <- reactive({
+    n <- input$pa_top_n
+    if (is.null(n) || is.na(n) || n < 1) 10L else min(as.integer(n), 50L)
   })
-  pa_jobcard_agg <- reactive({
-    h <- pa_history()
-    h <- if (nrow(h) == 0) h else h[h$EntryType == "Job Card", ]
-    empty <- data.frame(ItemID = character(0), Label = character(0), Count = integer(0), stringsAsFactors = FALSE)
-    if (nrow(h) == 0) return(empty)
-    df_inv <- inventory_data()
-    agg <- h %>% group_by(ItemID) %>% summarise(Count = n(), .groups = "drop") %>% arrange(desc(Count))
-    agg$Label <- vapply(agg$ItemID, pa_label_for_item, character(1), df_inv = df_inv)
-    agg
+  pa_summary <- reactive({
+    items <- pa_items()
+    empty <- data.frame(ItemID = character(0), Item = character(0), Machine = character(0),
+                        Category = character(0), `Sub-Category` = character(0),
+                        Entries = integer(0), `Job Cards` = integer(0), `Last Entry` = character(0),
+                        check.names = FALSE, stringsAsFactors = FALSE)
+    if (nrow(items) == 0) return(empty)
+    h <- pa_history(); hall <- pa_history_all()
+    ent <- pa_count_by_item(h)
+    jc <- pa_count_by_item(hall[hall$EntryType == "Job Card", , drop = FALSE])
+    last <- if (nrow(h) == 0) setNames(character(0), character(0)) else
+      vapply(split(h$DateOnly, h$ItemID), function(d) as.character(max(d)), character(1))
+    n_of <- function(v, id) { x <- v[id]; if (is.na(x)) 0L else as.integer(x) }
+    out <- data.frame(
+      ItemID = items$ItemID,
+      Item = vapply(seq_len(nrow(items)), function(i) item_identifier(items[i, ]), character(1)),
+      Machine = ifelse(items$Machine == "", "-", items$Machine),
+      Category = items$Category,
+      `Sub-Category` = items$SubCategory,
+      Entries = vapply(items$ItemID, function(id) n_of(ent, id), integer(1)),
+      `Job Cards` = vapply(items$ItemID, function(id) n_of(jc, id), integer(1)),
+      `Last Entry` = vapply(items$ItemID, function(id) { x <- last[id]; if (is.na(x)) "-" else x }, character(1)),
+      check.names = FALSE, stringsAsFactors = FALSE
+    )
+    min_jc <- input$pa_min_jc
+    if (!is.null(min_jc) && !is.na(min_jc) && min_jc > 0) out <- out[out$`Job Cards` >= min_jc, , drop = FALSE]
+    out <- out[order(-out$Entries, -out$`Job Cards`, out$Item), , drop = FALSE]
+    rownames(out) <- NULL
+    out
   })
+  pa_chart_data <- function(col) {
+    a <- pa_summary()
+    a$Value <- a[[col]]
+    a <- a[a$Value > 0, , drop = FALSE]
+    if (nrow(a) == 0) return(a)
+    a <- head(a[order(-a$Value), , drop = FALSE], pa_top_n())
+    a$Label <- ifelse(a$Machine == "-", a$Item, paste0(a$Item, " - ", a$Machine))
+    a
+  }
+  output$pa_n_items <- renderText({ nrow(pa_summary()) })
+  output$pa_n_entries <- renderText({ sum(pa_summary()$Entries) })
+  output$pa_n_jobcards <- renderText({ sum(pa_summary()$`Job Cards`) })
   output$pa_history_plot <- renderPlotly({
-    a <- pa_all_agg()
+    a <- pa_chart_data("Entries")
     if (nrow(a) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
-    top <- head(a, 10)
-    p <- ggplot(top, aes(x = reorder(Label, Count), y = Count, text = paste0(Count, " entrie(s)"))) +
+    p <- ggplot(a, aes(x = reorder(Label, Value), y = Value, text = paste0(Value, " entrie(s)"))) +
       geom_col(fill = "#0B4D3A") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
     ggplotly(p, tooltip = "text")
   })
   output$pa_jobcard_plot <- renderPlotly({
-    a <- pa_jobcard_agg()
+    a <- pa_chart_data("Job Cards")
     if (nrow(a) == 0) return(plotly_empty(type = "scatter", mode = "markers"))
-    top <- head(a, 10)
-    p <- ggplot(top, aes(x = reorder(Label, Count), y = Count, text = paste0(Count, " job card(s)"))) +
+    p <- ggplot(a, aes(x = reorder(Label, Value), y = Value, text = paste0(Value, " job card(s)"))) +
       geom_col(fill = "#D9A400") + coord_flip() + labs(x = NULL, y = NULL) + gg_theme
     ggplotly(p, tooltip = "text")
   })
+  pa_table_data <- function() {
+    a <- pa_summary()
+    a[, setdiff(names(a), "ItemID"), drop = FALSE]
+  }
+  output$pa_table <- renderTable({
+    a <- pa_summary()
+    if (nrow(a) == 0) return(data.frame(Message = "No plant matches these filters."))
+    pa_table_data()
+  })
+  output$pa_download <- downloadHandler(
+    filename = function() paste0("pmk_plant_analysis_", Sys.Date(), ".csv"),
+    content = function(file) write.csv(pa_table_data(), file, row.names = FALSE)
+  )
+
   # -------------------------------------------------------------
   # ADMIN - control panel, not an edit surface. All data edits stay
   # inline where the data lives (Inventory List, Whereabouts,
