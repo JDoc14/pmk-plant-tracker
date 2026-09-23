@@ -304,6 +304,20 @@ CATEGORY_COLOUR <- function(cat) {
          "#5B6770"
   )
 }
+# ---------------------------------------------------------------
+# GANG SHEETS / GANGERS - currently switched off
+# Plant Whereabouts (gang sheets), the Ganger list, and the Gang field
+# shown on plant items are HIDDEN, not deleted. Every bit of the code is
+# still here and the data is untouched: the Gang column stays on each
+# inventory item, GangMeta keeps syncing to the Sheet, and gang
+# assignments already recorded stay exactly as they are.
+#
+# Flip this back to TRUE and the whole lot reappears as it was - the
+# Plant Whereabouts sub-tab, its Home quick link, the Ganger List card
+# on Admin, the Gang line on an item's page, and the Gang column in
+# Admin's "Machines With No Driver" table. Nothing else needs changing.
+# ---------------------------------------------------------------
+GANG_FEATURES_ENABLED <- FALSE
 ENTRY_TYPES <- c("Driver Assigned", "Hours Updated", "Damage", "Refurbished", "Mechanic Work", "Note", "Service Inspection", "Job Card", "Truck Service")
 # "Invoice" is deliberately NOT in this list - Invoice history entries
 # are only ever created automatically from the Add Invoice form (see
@@ -1058,7 +1072,9 @@ server <- function(input, output, session) {
     tabs[["Plant"]] <- uiOutput("plant_tab_content")
     if (r %in% c("Admin", "Boss", "Kevin")) tabs[["Invoices"]] <- uiOutput("invoices_tab_content")
     if (r %in% c("Admin", "Boss", "Mechanic")) tabs[["Job Cards & Inspections"]] <- uiOutput("jobcards_tab_content")
-    if (r %in% c("Admin", "Boss", "Plantman")) tabs[["Admin"]] <- uiOutput("admin_tab_content")
+    # Plantman's only Admin panel is the Ganger List, so with gang
+    # features off they'd get an empty Admin tab - hide it for them.
+    if (r %in% c("Admin", "Boss") || (GANG_FEATURES_ENABLED && r == "Plantman")) tabs[["Admin"]] <- uiOutput("admin_tab_content")
     if (r %in% c("Admin", "Boss")) tabs[["Notifications"]] <- uiOutput("notifications_tab_content")
     do.call(tabsetPanel, c(
       list(id = "main_tabs", selected = "Home"),
@@ -1074,7 +1090,7 @@ server <- function(input, output, session) {
     r <- role()
     sub <- list()
     sub[["Inventory List"]] <- uiOutput("inventory_tab_content")
-    if (r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) sub[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
+    if (GANG_FEATURES_ENABLED && r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) sub[["Plant Whereabouts"]] <- uiOutput("whereabouts_tab_content")
     if (r %in% c("Admin", "Boss", "Mechanic")) sub[["Plant Analysis"]] <- uiOutput("plant_analysis_tab_content")
     tagList(
       br(),
@@ -1098,7 +1114,7 @@ server <- function(input, output, session) {
     ts_due <- truck_service_due(14)
     n_ts_due <- nrow(ts_due)
     quick_links <- c("Inventory List")
-    if (r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) quick_links <- c(quick_links, "Plant Whereabouts")
+    if (GANG_FEATURES_ENABLED && r %in% c("Admin", "Boss", "Mechanic", "Agent", "Plantman")) quick_links <- c(quick_links, "Plant Whereabouts")
     if (r %in% c("Admin", "Boss", "Kevin")) quick_links <- c(quick_links, "Invoices")
     if (r %in% c("Admin", "Boss", "Kevin")) quick_links <- c(quick_links, "Reports")
     if (r %in% c("Admin", "Boss", "Mechanic")) quick_links <- c(quick_links, "Job Cards & Inspections")
@@ -1379,7 +1395,7 @@ server <- function(input, output, session) {
             column(4,
                    p(strong("Driver: "), ifelse(row$Driver == "", "Unassigned", row$Driver)),
                    p(strong("Location: "), ifelse(row$Location == "", "-", row$Location)),
-                   p(strong("Gang: "), ifelse(row$Gang == "", "Not assigned", row$Gang)),
+                   if (GANG_FEATURES_ENABLED) p(strong("Gang: "), ifelse(row$Gang == "", "Not assigned", row$Gang)),
                    p(strong("History Entries: "), nrow(hist))
             ),
             column(4,
@@ -3404,7 +3420,8 @@ server <- function(input, output, session) {
   # week-by-item colour grid using grid.rect() instead.
   draw_tile_legend <- function(y = 0.07) {
     items <- list(c("Service Inspection", "#3E7C59"), c("Job Card", "#D9A400"),
-                  c("Mechanic Work", "#D6598E"), c("Multiple", "#7A4F79"), c("Nothing logged", "#E2E2E2"))
+                  c("Mechanic Work", "#D6598E"), c("Invoice", "#3A6EA5"),
+                  c("Multiple", "#7A4F79"), c("Nothing logged", "#E2E2E2"))
     n <- length(items)
     for (i in seq_len(n)) {
       x0 <- (i - 1) / n + 0.01
@@ -4028,7 +4045,7 @@ server <- function(input, output, session) {
     tagList(
       br(),
       p(class = "text-muted",
-        "Green = Service Inspection, yellow = Job Card, pink = Mechanic Work, logged that week - split square = more than one. Last 52 weeks. Click any coloured square to see exactly what was logged. ",
+        "Green = Service Inspection, yellow = Job Card, pink = Mechanic Work, blue = Invoice, logged that week - split square = more than one. Last 52 weeks. Click any coloured square to see exactly what was logged. ",
         "Shown grouped by Category/Sub-Category by default - pick a Category (and optionally Sub-Category) to narrow it down, or download the full log below."),
       fluidRow(
         column(4, selectInput("jg_category", "Category", choices = c("All", CATEGORY_OPTIONS), selected = "All")),
@@ -4040,6 +4057,7 @@ server <- function(input, output, session) {
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3E7C59;border-radius:2px;display:inline-block;"), "Service Inspection"),
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D9A400;border-radius:2px;display:inline-block;"), "Job Card"),
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#D6598E;border-radius:2px;display:inline-block;"), "Mechanic Work"),
+          div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#3A6EA5;border-radius:2px;display:inline-block;"), "Invoice"),
           div(style = "display:flex; align-items:center; gap:5px;", span(style = "width:12px;height:12px;background:#E2E2E2;border-radius:2px;display:inline-block;"), "Nothing logged")
       )
     )
@@ -4064,7 +4082,7 @@ server <- function(input, output, session) {
   })
   jg_events <- reactive({
     h <- plant_history()
-    h <- h[h$EntryType %in% c("Service Inspection", "Job Card", "Mechanic Work"), ]
+    h <- h[h$EntryType %in% names(JG_TYPE_COLOURS), ]
     if (nrow(h) == 0) return(h)
     h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
     h$Week <- floor_to_monday(h$DateOnly)
@@ -4073,7 +4091,12 @@ server <- function(input, output, session) {
   # Colour per entry type shown on the grid - a single square gets a
   # diagonal-stripe gradient if more than one type happened the same
   # week for the same item, rather than only having room for two.
-  JG_TYPE_COLOURS <- c("Service Inspection" = "#3E7C59", "Job Card" = "#D9A400", "Mechanic Work" = "#D6598E")
+  # Blue for Invoice - an invoice logged against an item creates a
+  # history entry automatically, so the grid shows spend on a machine
+  # next to the work done on it. Everything downstream (the grid, the
+  # click pop-up, the CSV, the PDF tile grids) reads this one list.
+  JG_TYPE_COLOURS <- c("Service Inspection" = "#3E7C59", "Job Card" = "#D9A400",
+                       "Mechanic Work" = "#D6598E", "Invoice" = "#3A6EA5")
   jg_cell_style <- function(types_present) {
     if (length(types_present) == 0) return("#E2E2E2")
     if (length(types_present) == 1) return(JG_TYPE_COLOURS[[types_present[1]]])
@@ -4332,7 +4355,7 @@ server <- function(input, output, session) {
           uiOutput("admin_company_list_ui")
       )
     )
-    if (r %in% c("Admin", "Boss", "Plantman")) panels[["Ganger List"]] <- accordion_panel("Ganger List", value = "Ganger List",
+    if (GANG_FEATURES_ENABLED && r %in% c("Admin", "Boss", "Plantman")) panels[["Ganger List"]] <- accordion_panel("Ganger List", value = "Ganger List",
       div(class = "admin-card",
           p(class = "text-muted", "Names available in the Ganger dropdown when creating or editing a gang sheet."),
           fluidRow(
@@ -4393,10 +4416,12 @@ server <- function(input, output, session) {
     unassigned <- df[df$Active == "Yes" & (is.na(df$Driver) | df$Driver == ""), ]
     if (nrow(unassigned) == 0) return(data.frame(Message = "Every active item has a driver assigned."))
     unassigned <- natural_sort_rows(unassigned)
-    unassigned %>% transmute(Item = ifelse(Machine == "", ItemID, Machine),
-                             `PMK/Reg` = ifelse(PMK_Number != "", PMK_Number, Registration),
-                             Category, `Sub-Category` = SubCategory,
-                             Gang = ifelse(Gang == "", "Not assigned", Gang))
+    out <- unassigned %>% transmute(Item = ifelse(Machine == "", ItemID, Machine),
+                                    `PMK/Reg` = ifelse(PMK_Number != "", PMK_Number, Registration),
+                                    Category, `Sub-Category` = SubCategory,
+                                    Gang = ifelse(Gang == "", "Not assigned", Gang))
+    if (!GANG_FEATURES_ENABLED) out$Gang <- NULL
+    out
   })
   output$admin_staff_activity_table <- renderTable({
     week_s <- floor_to_monday(Sys.Date())
