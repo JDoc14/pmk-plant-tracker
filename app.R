@@ -640,6 +640,145 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
   do.call(accordion, c(list(id = base_id, open = FALSE), cat_panels))
 }
 # ---------------------------------------------------------------
+# PRINTABLE JOB CARD
+# Job Card entries are stored as a flat "Key: value" description (see
+# build_jobcard_desc), so printing one means reading those fields back
+# out. Values can run to several lines - the work descriptions are free
+# text areas, and Additional Comments is deliberately written last - so
+# the parser treats any line that doesn't start with a known key as a
+# continuation of the field it's currently reading.
+# ---------------------------------------------------------------
+JOBCARD_KEYS <- c("Machine", "Job No.", "Depot", "Date Started", "Odometer/Hours",
+                  "Work To Be Done", "Work Carried Out", "Time Taken", "Done By",
+                  "Date Completed", "Location", "Price", "Additional Comments")
+parse_entry_fields <- function(desc, keys) {
+  out <- setNames(as.list(rep("", length(keys))), keys)
+  if (is.null(desc) || is.na(desc) || desc == "") return(out)
+  cur <- NA_character_
+  for (ln in strsplit(desc, "\n", fixed = TRUE)[[1]]) {
+    hit <- NA_character_
+    for (k in keys) if (startsWith(ln, paste0(k, ":"))) { hit <- k; break }
+    if (!is.na(hit)) {
+      cur <- hit
+      out[[cur]] <- trimws(substring(ln, nchar(hit) + 2))
+    } else if (!is.na(cur)) {
+      out[[cur]] <- paste0(out[[cur]], "\n", ln)
+    }
+  }
+  lapply(out, trimws)
+}
+# One A4 portrait sheet per Job Card, drawn with base grid only - no
+# gridExtra, same constraint as the rest of the reporting. Sections grow
+# with their content and spill onto a second page rather than being
+# truncated, so a long write-up still prints in full.
+generate_jobcard_pdf <- function(file, entry, item) {
+  f <- parse_entry_fields(entry$Description, JOBCARD_KEYS)
+  nz <- function(x, d = "-") if (is.null(x) || length(x) == 0 || is.na(x) || trimws(x) == "") d else trimws(x)
+  GREEN <- "#0B4D3A"; GOLD <- "#C9A227"; SLATE <- "#5B6770"; INK <- "#12241C"
+  LINE <- "#C9C6BC"; BAND <- "#EDEAE1"
+  WRAP <- 96; BOTTOM <- 0.075
+  pdf(file, width = 8.27, height = 11.69)
+  on.exit(dev.off(), add = TRUE)
+  txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
+              gp = gpar(fontsize = cex, col = col, fontface = face, lineheight = 1.25))
+  rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
+    grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
+              just = c("left", "top"), gp = gpar(fill = fill, col = col, lwd = lwd))
+  hrule <- function(y, x0 = 0.07, x1 = 0.93)
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = LINE, lwd = 0.7))
+  fld <- function(x, y, w, h, label, value, vcex = 9.5) {
+    rct(x, y, w, h)
+    txt(toupper(label), x + 0.012, y - 0.008, 6.2, SLATE, "bold")
+    txt(value, x + 0.012, y - h + 0.011, vcex, INK, just = c("left", "bottom"))
+  }
+  header <- function(cont = FALSE) {
+    grid.newpage()
+    grid.rect(gp = gpar(fill = "#FFFFFF", col = NA))
+    rct(0, 1, 1, 0.085, fill = GREEN, col = NA)
+    rct(0, 0.915, 1, 0.006, fill = GOLD, col = NA)
+    txt("PMK CIVIL ENGINEERING LTD", 0.07, 0.972, 13, "#FFFFFF", "bold")
+    txt("Process 4 - Plant and Equipment", 0.07, 0.945, 8, "#D7E3DC")
+    txt(if (cont) "JOB CARD (CONT.)" else "JOB CARD", 0.93, 0.972, 15, GOLD, "bold", just = c("right", "top"))
+    txt(paste("Ref", nz(entry$EntryID)), 0.93, 0.946, 8, "#D7E3DC", just = c("right", "top"))
+  }
+  footer <- function() {
+    hrule(0.055)
+    txt(paste0("Logged by ", nz(entry$RecordedBy), " on ", nz(entry$DateTime),
+               "  |  ", nz(item$Machine), "  |  Serial ", nz(item$SerialNumber)),
+        0.07, 0.045, 7, SLATE)
+    txt("PMK Plant Tracker", 0.93, 0.045, 7, SLATE, just = c("right", "top"))
+  }
+  sec_lines <- function(body) { l <- wrap_lines(nz(body), WRAP); if (length(l) == 0) "-" else l }
+  # Box heights are MEASURED from the rendered text rather than estimated
+  # from point size - an estimate was close enough for a short job card
+  # and silently overflowed the box on a long one.
+  th <- function(s, cex = 9)
+    convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
+  header()
+  rh <- 0.046; y <- 0.885
+  fld(0.07, y, 0.29, rh, "PMK Plant Number", nz(item_identifier(item)), 11)
+  fld(0.36, y, 0.30, rh, "Make & Type", nz(item$Machine))
+  fld(0.66, y, 0.27, rh, "Registration", nz(item$Registration))
+  y <- y - rh
+  fld(0.07, y, 0.29, rh, "Job No.", nz(f[["Job No."]]), 11)
+  fld(0.36, y, 0.30, rh, "Depot", nz(f[["Depot"]]))
+  fld(0.66, y, 0.27, rh, "Odometer / Hours", nz(f[["Odometer/Hours"]]))
+  y <- y - rh
+  fld(0.07, y, 0.29, rh, "Date Started", nz(f[["Date Started"]]))
+  fld(0.36, y, 0.30, rh, "Date Completed", nz(f[["Date Completed"]]))
+  fld(0.66, y, 0.27, rh, "Category", paste0(nz(item$Category), " > ", nz(item$SubCategory)))
+  cursor <- y - rh - 0.016
+  L1 <- th("A"); LH <- th("A\nA") - L1        # one line, and each extra line
+  block_h <- function(n) L1 + max(n - 1, 0) * LH
+  draw_sec <- function(top, heading, lines, cont = FALSE) {
+    h <- max(block_h(length(lines)), block_h(3)) + 0.020
+    rct(0.07, top, 0.86, 0.028, fill = BAND, col = BAND)
+    txt(paste0(toupper(heading), if (cont) " (CONT.)" else ""), 0.082, top - 0.008, 7.5, GREEN, "bold")
+    rct(0.07, top - 0.028, 0.86, h)
+    txt(paste(lines, collapse = "\n"), 0.082, top - 0.041, 9)
+    top - 0.028 - h - 0.014
+  }
+  # Fills the page, then carries the rest onto the next one under a
+  # "(CONT.)" heading - so a long write-up is never cut off.
+  place <- function(cursor, heading, lines) {
+    cont <- FALSE
+    repeat {
+      avail <- cursor - 0.028 - 0.020 - BOTTOM
+      if (avail < block_h(3)) { footer(); header(cont = TRUE); cursor <- 0.885; next }
+      fits <- max(1L, as.integer(floor((avail - L1) / LH)) + 1L)
+      if (length(lines) <= fits) return(draw_sec(cursor, heading, lines, cont))
+      cursor <- draw_sec(cursor, heading, lines[seq_len(fits)], cont)
+      lines <- lines[-seq_len(fits)]
+      cont <- TRUE
+      footer(); header(cont = TRUE); cursor <- 0.885
+    }
+  }
+  secs <- list(
+    list("Description of work to be done", sec_lines(f[["Work To Be Done"]])),
+    list("Description of work carried out", sec_lines(f[["Work Carried Out"]])),
+    list("Additional comments", sec_lines(f[["Additional Comments"]]))
+  )
+  for (s in secs) cursor <- place(cursor, s[[1]], s[[2]])
+  y <- cursor - 0.006
+  if (y - 0.175 < 0.055) { footer(); header(cont = TRUE); y <- 0.885 }
+  fld(0.07, y, 0.29, rh, "Time Taken", nz(f[["Time Taken"]]))
+  fld(0.36, y, 0.30, rh, "Work Done By", nz(f[["Done By"]]))
+  fld(0.66, y, 0.27, rh, "Driver", nz(item$Driver, "Unassigned"))
+  y <- y - rh - 0.013
+  rct(0.07, y, 0.86, 0.028, fill = BAND, col = BAND)
+  txt("SIGN-OFF", 0.082, y - 0.008, 7.5, GREEN, "bold")
+  y2 <- y - 0.028
+  rct(0.07, y2, 0.43, 0.080); rct(0.50, y2, 0.43, 0.080)
+  txt("SIGNATURE - WORK CARRIED OUT BY", 0.082, y2 - 0.008, 6.2, SLATE, "bold")
+  txt("SIGNATURE - CHECKED BY", 0.512, y2 - 0.008, 6.2, SLATE, "bold")
+  hrule(y2 - 0.066, 0.082, 0.485); hrule(y2 - 0.066, 0.512, 0.915)
+  txt(nz(f[["Done By"]]), 0.082, y2 - 0.071, 8, SLATE)
+  txt("Date", 0.485, y2 - 0.071, 8, SLATE, just = c("right", "top"))
+  footer()
+  invisible(NULL)
+}
+# ---------------------------------------------------------------
 # MAIN APP UI
 # ---------------------------------------------------------------
 app_ui <- fluidPage(
@@ -1428,7 +1567,13 @@ server <- function(input, output, session) {
         div(class = "history-item", style = if (nrow(linked_row) > 0) "border-left-color:#C9A227;" else NULL,
             div(class = "d-flex justify-content-between align-items-start flex-wrap",
                 div(strong(h$EntryType), span(class = "text-muted", paste0(" - ", h$DateTime))),
-                if (r %in% c("Admin", "Boss", "Mechanic", "Plantman") && !is.na(h$EntryID) && h$EntryID != "") div(
+                div(
+                  # Printing is read-only, so it isn't gated on the editing roles.
+                  if (h$EntryType == "Job Card" && !is.na(h$EntryID) && h$EntryID != "")
+                    tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
+                           onclick = sprintf("Shiny.setInputValue('print_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
+                           "Print"),
+                  if (r %in% c("Admin", "Boss", "Mechanic", "Plantman") && !is.na(h$EntryID) && h$EntryID != "") tagList(
                   if (nrow(linked_row) > 0) tags$a(href = "#", style = "font-size:0.8rem; color:#9C2B2B; margin-right:10px;",
                                                    onclick = sprintf("Shiny.setInputValue('unlink_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
                                                    "Unlink")
@@ -1441,6 +1586,7 @@ server <- function(input, output, session) {
                   tags$a(href = "#", style = "font-size:0.8rem; color:#9C2B2B;",
                          onclick = sprintf("Shiny.setInputValue('delete_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
                          "Delete")
+                  )
                 )
             ),
             if (nrow(linked_row) > 0) p(class = "mb-1", style = "font-size:0.85rem; color:#8a6d00;",
@@ -2095,6 +2241,44 @@ server <- function(input, output, session) {
     removeModal()
     showNotification("Entry removed.", type = "message")
   })
+  # ---- Print a single Job Card ----
+  # Read-only throughout: nothing here writes to plant_history() or
+  # inventory_data(), it only reads the entry and renders a PDF.
+  printing_entry <- reactiveVal(NULL)
+  observeEvent(input$print_entry_click, {
+    eid <- input$print_entry_click
+    row <- plant_history()[plant_history()$EntryID == eid, ]
+    req(nrow(row) == 1)
+    printing_entry(eid)
+    item <- inventory_data()[inventory_data()$ItemID == row$ItemID[1], ]
+    label <- if (nrow(item) > 0) item_identifier(item[1, ]) else row$ItemID[1]
+    removeModal()
+    showModal(modalDialog(
+      title = paste0("Print Job Card - ", label),
+      p("A one-page A4 sheet: machine details, the work requested and carried out, any additional comments, and space for signatures. A long write-up runs onto a second page rather than being cut off."),
+      downloadButton("entry_pdf", "Download Job Card (PDF)", class = "btn-primary"),
+      easyClose = TRUE,
+      footer = modalButton("Close")
+    ))
+  })
+  printing_parts <- reactive({
+    eid <- printing_entry(); req(eid)
+    row <- plant_history()[plant_history()$EntryID == eid, ]
+    req(nrow(row) == 1)
+    item <- inventory_data()[inventory_data()$ItemID == row$ItemID[1], ]
+    req(nrow(item) > 0)
+    list(entry = row[1, ], item = item[1, ])
+  })
+  output$entry_pdf <- downloadHandler(
+    filename = function() {
+      p <- printing_parts()
+      paste0("pmk_job_card_", gsub("[^A-Za-z0-9]+", "_", item_identifier(p$item)), "_", p$entry$EntryID, ".pdf")
+    },
+    content = function(file) {
+      p <- printing_parts()
+      generate_jobcard_pdf(file, p$entry, p$item)
+    }
+  )
   # ---- Entry counts + per-item history download ----
   # Named ItemID -> count, shared by every plant box so the whole list
   # is counted once per history change rather than once per box.
