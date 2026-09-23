@@ -4057,8 +4057,18 @@ server <- function(input, output, session) {
         column(4, selectizeInput("jg_subcategory", "Sub-Category", choices = "All", selected = "All")),
         column(4, div(style = "margin-top:24px;", downloadButton("jg_download", "Download (CSV)", class = "btn-primary btn-sm")))
       ),
-      div(class = "chart-card",
-          h6("Plant with nothing logged"),
+      # Collapsible, and shut by default - it's a "go looking" tool rather
+      # than something you want between you and the grid every visit. The
+      # count in the title keeps it useful while it's closed, and Bootstrap
+      # only hides the panel body rather than removing it, so the controls
+      # inside still drive the grid below even when it's collapsed.
+      accordion(
+        id = "jg_overdue_accordion", open = FALSE,
+        accordion_panel(
+          title = tagList("Plant with nothing logged",
+                          span(class = "text-muted", style = "font-weight:400;",
+                               textOutput("jg_overdue_count_label", inline = TRUE))),
+          value = "jg_overdue",
           p(class = "text-muted mb-2",
             "Which machines haven't been seen for a while. Pick what counts as having been seen - the same entry types the grid shows - and how far back to look."),
           fluidRow(
@@ -4076,6 +4086,7 @@ server <- function(input, output, session) {
           checkboxInput("jg_ov_only", "Show only these items in the grid below", value = FALSE),
           uiOutput("jg_overdue_summary"),
           div(style = "max-height:320px; overflow-y:auto;", tableOutput("jg_overdue_table"))
+        )
       ),
       div(class = "chart-card", style = "overflow-x:auto;", uiOutput("jg_grid")),
       div(style = "display:flex; gap:16px; margin-top:6px; font-size:11px; color:#666; flex-wrap:wrap;",
@@ -4186,6 +4197,10 @@ server <- function(input, output, session) {
     else div(class = "alert alert-warning mb-2",
       paste0(nrow(ov), " of ", total, " active item(s) have had no ", kinds,
              " logged in the last ", jg_ov_window_label(), "."))
+  })
+  output$jg_overdue_count_label <- renderText({
+    n <- nrow(jg_overdue())
+    if (n == 0) " - nothing outstanding" else paste0(" - ", n, " outstanding")
   })
   jg_overdue_table_data <- function() {
     ov <- jg_overdue()
