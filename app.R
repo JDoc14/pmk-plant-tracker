@@ -1649,6 +1649,8 @@ server <- function(input, output, session) {
         column(6, textInput("ih_location", "Location")),
         column(6, numericInput("ih_price", "Price (£)", value = NA))
       ),
+      textAreaInput("ih_comments", "Additional Comments", rows = 3,
+                    placeholder = "Optional - anything else worth recording. Appears in its own box on the printed sheet."),
       dateInput("ih_date", "Date (used to sort this entry in History)", value = Sys.Date()),
       footer = tagList(modalButton("Cancel"), actionButton("ih_submit", "Save Entry", class = "btn-primary"))
     ))
@@ -1945,6 +1947,11 @@ server <- function(input, output, session) {
     if (!is.null(input$ih_price) && !is.na(input$ih_price)) extra <- c(extra, paste0("Price: £", sprintf("%.2f", input$ih_price)))
     if (is_subcontractor) extra <- c(extra, paste0("Company: ", trimws(input$ih_sub_company)),
                                      paste0("Amount: £", sprintf("%.2f", input$ih_sub_amount)))
+    # Kept last on purpose: the printed sheet takes everything after this
+    # marker as the comment, so a multi-line comment stays intact.
+    if (!is.null(input$ih_comments) && trimws(input$ih_comments) != "") {
+      extra <- c(extra, paste0("Additional Comments: ", trimws(input$ih_comments)))
+    }
     if (length(extra) > 0) desc <- paste(c(desc, extra), collapse = "\n")
     invoice_id_for_entry <- NA_character_
     if (is_subcontractor) {
