@@ -324,6 +324,12 @@ ENTRY_TYPES <- c("Driver Assigned", "Hours Updated", "Damage", "Refurbished", "M
 # by hand - it's created automatically when an invoice is logged against
 # an item - but it's still a real entry type once it's there.
 ALL_ENTRY_TYPES <- sort(unique(c(ENTRY_TYPES, "Invoice")))
+# Category display order for reports - not the same as CATEGORY_OPTIONS
+# (which is ordered for the picker dropdowns); this is the order asked
+# for on reports, with anything unrecognised tacked on the end. Defined
+# at file level because both the in-app report code and the standalone
+# period-report generator need it.
+REPORT_CATEGORY_ORDER <- c("Excavator", "Trailer", "Breaker", "Misc", "Vehicle")
 # "Invoice" is deliberately NOT in this list - Invoice history entries
 # are only ever created automatically from the Add Invoice form (see
 # ni_submit), which fills in Company/Amount/etc. Exposing it as a
@@ -545,15 +551,24 @@ item_identifier <- function(row) {
 # 2), within whatever grouping the caller already filtered to (e.g.
 # one Category>Sub-Category). Without this, newly added/edited items
 # always land at the bottom, since they're just appended to the data.
-natural_sort_rows <- function(df) {
-  if (nrow(df) == 0) return(df)
-  ids <- vapply(seq_len(nrow(df)), function(i) item_identifier(df[i, ]), character(1))
+natural_order <- function(ids) {
   nums <- vapply(ids, function(s) {
     m <- regmatches(s, regexpr("[0-9]+$", s))
     if (length(m) == 0) NA_real_ else as.numeric(m)
   }, numeric(1))
   prefix <- trimws(sub("[0-9]+$", "", ids))
-  df[order(prefix, is.na(nums), nums, ids), ]
+  order(prefix, is.na(nums), nums, ids)
+}
+natural_sort_rows <- function(df) {
+  if (nrow(df) == 0) return(df)
+  ids <- vapply(seq_len(nrow(df)), function(i) item_identifier(df[i, ]), character(1))
+  df[natural_order(ids), ]
+}
+# Same ordering, for a table that already carries its identifier as a
+# plain column (the period report's stats table).
+natural_sort_labels <- function(df, col = "Item") {
+  if (nrow(df) == 0) return(df)
+  df[natural_order(as.character(df[[col]])), , drop = FALSE]
 }
 # Loosely normalises an identifier for matching purposes only (never
 # for display/storage) - strips spaces/punctuation, upper-cases, and
@@ -638,6 +653,337 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
     )
   })
   do.call(accordion, c(list(id = base_id, open = FALSE), cat_panels))
+}
+# ---------------------------------------------------------------
+# PERIOD REPORTS - month / quarter / half year / year
+# One PDF covering a whole period: a fleet summary with every item and
+# its counts, a Job Cards & Inspections grid, ranked analysis, and
+# optionally every entry in full.
+#
+# Grid squares carry a LETTER as well as a colour (S/J/M/I, + for more
+# than one) on a pale fill with a coloured outline. Solid colour alone
+# is fine on screen but the gold and pink squares wash out on a mono or
+# low-toner printer, taking a white letter with them - dark letter on
+# pale ground survives both, and photocopies.
+# ---------------------------------------------------------------
+report_period_bounds <- function(scope, value) {
+  add_m <- function(d, n) seq(d, by = paste(n, "months"), length.out = 2)[2]
+  if (scope == "Month") {
+    s <- as.Date(paste0(value, "-01")); e <- add_m(s, 1) - 1
+    lbl <- format(s, "%B %Y")
+  } else if (scope == "Quarter") {
+    y <- as.integer(substr(value, 1, 4)); q <- as.integer(substr(value, 7, 7))
+    s <- as.Date(sprintf("%d-%02d-01", y, (q - 1) * 3 + 1)); e <- add_m(s, 3) - 1
+    lbl <- sprintf("Q%d %d (%s - %s)", q, y, format(s, "%b"), format(e, "%b"))
+  } else if (scope == "Half year") {
+    y <- as.integer(substr(value, 1, 4)); h <- as.integer(substr(value, 7, 7))
+    s <- as.Date(sprintf("%d-%02d-01", y, (h - 1) * 6 + 1)); e <- add_m(s, 6) - 1
+    lbl <- sprintf("H%d %d (%s - %s)", h, y, format(s, "%b"), format(e, "%b"))
+  } else {
+    y <- as.integer(value)
+    s <- as.Date(sprintf("%d-01-01", y)); e <- as.Date(sprintf("%d-12-31", y))
+    lbl <- paste("Year", y)
+  }
+  list(start = s, end = e, label = lbl)
+}
+report_period_choices <- function(scope, today = Sys.Date()) {
+  back <- function(from, by, n) seq(from, by = by, length.out = n)   # newest first
+  m_now <- as.Date(format(today, "%Y-%m-01"))
+  if (scope == "Month") {
+    st <- back(m_now, "-1 month", 24)
+    return(setNames(format(st, "%Y-%m"), format(st, "%B %Y")))
+  }
+  if (scope == "Quarter") {
+    q_now <- as.Date(sprintf("%s-%02d-01", format(today, "%Y"),
+                             (as.integer(format(today, "%m")) - 1) %/% 3 * 3 + 1))
+    st <- back(q_now, "-3 months", 8)
+    q <- (as.integer(format(st, "%m")) - 1) %/% 3 + 1
+    en <- as.Date(vapply(seq_along(st), function(i) as.character(seq(st[i], by = "3 months", length.out = 2)[2] - 1), character(1)))
+    return(setNames(sprintf("%s-Q%d", format(st, "%Y"), q),
+                    sprintf("Q%d %s (%s - %s)", q, format(st, "%Y"), format(st, "%b"), format(en, "%b"))))
+  }
+  if (scope == "Half year") {
+    h_now <- as.Date(sprintf("%s-%02d-01", format(today, "%Y"),
+                             if (as.integer(format(today, "%m")) <= 6) 1 else 7))
+    st <- back(h_now, "-6 months", 6)
+    h <- ifelse(as.integer(format(st, "%m")) == 1, 1, 2)
+    en <- as.Date(vapply(seq_along(st), function(i) as.character(seq(st[i], by = "6 months", length.out = 2)[2] - 1), character(1)))
+    return(setNames(sprintf("%s-H%d", format(st, "%Y"), h),
+                    sprintf("H%d %s (%s - %s)", h, format(st, "%Y"), format(st, "%b"), format(en, "%b"))))
+  }
+  y <- as.integer(format(today, "%Y")) - (0:4)
+  setNames(as.character(y), as.character(y))
+}
+# Per-item counts for a period. Invoices are attributed through the
+# history entry each one creates (its InvoiceID), rather than by
+# re-matching reference text - so an invoice counts against exactly the
+# item its entry was filed against, or not at all.
+report_item_stats <- function(inv_data, history_df, invoices_df) {
+  ids <- inv_data$ItemID
+  n_entries <- vapply(ids, function(i) sum(history_df$ItemID == i), integer(1))
+  inv_rows <- history_df[!is.na(history_df$InvoiceID) & history_df$InvoiceID != "", , drop = FALSE]
+  n_invoices <- vapply(ids, function(i) sum(inv_rows$ItemID == i), integer(1))
+  amt <- setNames(suppressWarnings(as.numeric(invoices_df$Amount)), invoices_df$InvoiceID)
+  spend <- vapply(ids, function(i) {
+    k <- inv_rows$InvoiceID[inv_rows$ItemID == i]
+    if (!length(k)) return(0)
+    v <- amt[k]; sum(v[!is.na(v)])
+  }, numeric(1))
+  n_jobcards <- vapply(ids, function(i) sum(history_df$ItemID == i & history_df$EntryType == "Job Card"), integer(1))
+  data.frame(ItemID = ids,
+             Item = vapply(seq_len(nrow(inv_data)), function(i) item_identifier(inv_data[i, ]), character(1)),
+             Machine = ifelse(inv_data$Machine == "", "-", inv_data$Machine),
+             Category = inv_data$Category, SubCategory = inv_data$SubCategory,
+             Entries = n_entries, Invoices = n_invoices, JobCards = n_jobcards, Spend = spend,
+             stringsAsFactors = FALSE)
+}
+generate_period_report_pdf <- function(file, label, start, end, inv_data, history_df, invoices_df,
+                                       include_detail = TRUE, generated = Sys.time()) {
+  GREEN <- "#0B4D3A"; GOLD <- "#C9A227"; SLATE <- "#5B6770"; INK <- "#12241C"
+  LINE <- "#C9C6BC"; BAND <- "#EDEAE1"; ZEBRA <- "#F6F5F1"
+  SOLID <- c("Service Inspection" = "#3E7C59", "Job Card" = "#D9A400",
+             "Mechanic Work" = "#D6598E", "Invoice" = "#3A6EA5")
+  TINT <- c("Service Inspection" = "#D8E5DD", "Job Card" = "#F7E6B8",
+            "Mechanic Work" = "#F5D7E4", "Invoice" = "#D5E1EE")
+  DARK <- c("Service Inspection" = "#2C5B41", "Job Card" = "#8A6A00",
+            "Mechanic Work" = "#A33C68", "Invoice" = "#2A527C")
+  LET <- c("Service Inspection" = "S", "Job Card" = "J", "Mechanic Work" = "M", "Invoice" = "I")
+  MULTI <- "#7A4F79"; MULTI_T <- "#E3D9E3"; MULTI_D <- "#5C3A5B"
+  EMPTY_T <- "#F2F2F2"; EMPTY_L <- "#D5D5D5"
+  pdf(file, width = 8.27, height = 11.69)
+  on.exit(dev.off(), add = TRUE)
+  PG <- 0
+  txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
+              gp = gpar(fontsize = cex, col = col, fontface = face, lineheight = 1.25))
+  ctr <- function(s, x, y, cex = 7, col = INK, face = "bold")
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = col, fontface = face))
+  rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
+    grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
+              just = c("left", "top"), gp = gpar(fill = fill, col = col, lwd = lwd))
+  hrule <- function(y, x0 = 0.07, x1 = 0.93, col = LINE)
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = col, lwd = 0.7))
+  th <- function(s, cex = 9)
+    convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
+  money <- function(v) paste0("£", formatC(v, format = "f", digits = 2, big.mark = ","))
+  hdr <- function(sub = "") {
+    grid.newpage(); grid.rect(gp = gpar(fill = "#FFFFFF", col = NA)); PG <<- PG + 1
+    rct(0, 1, 1, 0.072, fill = GREEN, col = NA); rct(0, 0.928, 1, 0.005, fill = GOLD, col = NA)
+    txt("PMK CIVIL ENGINEERING LTD", 0.07, 0.978, 12, "#FFFFFF", "bold")
+    txt("Process 4 - Plant and Equipment", 0.07, 0.955, 7.5, "#D7E3DC")
+    txt("PLANT REPORT", 0.93, 0.978, 13, GOLD, "bold", just = c("right", "top"))
+    txt(paste0(label, if (nzchar(sub)) paste0("  -  ", sub) else ""), 0.93, 0.955, 8, "#D7E3DC", just = c("right", "top"))
+  }
+  ftr <- function() {
+    hrule(0.048)
+    txt(paste0("Generated ", format(generated, "%d %b %Y, %H:%M"), "  |  PMK Plant Tracker"), 0.07, 0.038, 7, SLATE)
+    txt(paste("Page", PG), 0.93, 0.038, 7, SLATE, just = c("right", "top"))
+  }
+  BOTTOM <- 0.070
+  st <- report_item_stats(inv_data, history_df, invoices_df)
+  cats <- c(intersect(REPORT_CATEGORY_ORDER, unique(st$Category)),
+            setdiff(sort(unique(st$Category)), REPORT_CATEGORY_ORDER))
+  tot_spend <- sum(suppressWarnings(as.numeric(invoices_df$Amount)), na.rm = TRUE)
+  # ---- fleet summary ----
+  hdr()
+  txt("Fleet Summary", 0.07, 0.895, 17, INK)
+  txt("Every item of plant, grouped by category. Counts cover this period only.", 0.07, 0.862, 8.5, SLATE)
+  tiles <- list(c(as.character(nrow(st)), "Plant Items"), c(as.character(nrow(history_df)), "History Entries"),
+                c(as.character(nrow(invoices_df)), "Invoices"), c(money(tot_spend), "Total Spend"))
+  for (i in seq_along(tiles)) {
+    x <- 0.07 + (i - 1) * 0.2175
+    rct(x, 0.835, 0.1975, 0.070, fill = "#FFFFFF", col = LINE); rct(x, 0.835, 0.1975, 0.004, fill = GREEN, col = NA)
+    ctr(tiles[[i]][1], x + 0.099, 0.805, 13, GREEN); ctr(toupper(tiles[[i]][2]), x + 0.099, 0.780, 6.3, SLATE, "plain")
+  }
+  colx <- c(0.085, 0.265); colr <- c(0.695, 0.800, 0.915)
+  hdrow <- function(y) {
+    rct(0.07, y, 0.86, 0.026, fill = GREEN, col = GREEN)
+    txt("ITEM", colx[1], y - 0.008, 6.3, "#FFFFFF", "bold"); txt("MACHINE", colx[2], y - 0.008, 6.3, "#FFFFFF", "bold")
+    txt("ENTRIES", colr[1], y - 0.008, 6.3, "#FFFFFF", "bold", just = c("right", "top"))
+    txt("INVOICES", colr[2], y - 0.008, 6.3, "#FFFFFF", "bold", just = c("right", "top"))
+    txt("SPEND", colr[3], y - 0.008, 6.3, "#FFFFFF", "bold", just = c("right", "top"))
+    y - 0.026
+  }
+  cur <- hdrow(0.742); z <- 0
+  brk <- function(need) { if (cur - need < BOTTOM) { ftr(); hdr("Fleet Summary"); cur <<- hdrow(0.885) } }
+  for (ct in cats) {
+    rows_c <- st[st$Category == ct, , drop = FALSE]
+    if (!nrow(rows_c)) next
+    subs <- if (!is.null(SUBCATEGORY_MAP[[ct]]))
+      c(intersect(SUBCATEGORY_MAP[[ct]], unique(rows_c$SubCategory)), setdiff(unique(rows_c$SubCategory), SUBCATEGORY_MAP[[ct]]))
+    else sort(unique(rows_c$SubCategory))
+    brk(0.09)
+    rct(0.07, cur, 0.86, 0.024, fill = CATEGORY_COLOUR(ct), col = NA)
+    txt(toupper(ct), 0.082, cur - 0.007, 8, "#FFFFFF", "bold"); cur <- cur - 0.024
+    for (sc in subs) {
+      rows <- natural_sort_labels(rows_c[rows_c$SubCategory == sc, , drop = FALSE])
+      if (!nrow(rows)) next
+      brk(0.07)
+      rct(0.07, cur, 0.86, 0.020, fill = BAND, col = NA)
+      txt(paste0(sc, " (", nrow(rows), ")"), 0.088, cur - 0.006, 7, "#3A3A3A", "bold"); cur <- cur - 0.020
+      for (i in seq_len(nrow(rows))) {
+        r <- rows[i, ]; z <- z + 1; brk(0.03)
+        if (z %% 2 == 0) rct(0.07, cur, 0.86, 0.0225, fill = ZEBRA, col = NA)
+        dim <- if (r$Entries == 0 && r$Invoices == 0) SLATE else INK
+        txt(r$Item, colx[1], cur - 0.0065, 8.5, dim, if (r$Entries > 0) "bold" else "plain")
+        txt(r$Machine, colx[2], cur - 0.0065, 8.5, dim)
+        txt(as.character(r$Entries), colr[1], cur - 0.0065, 8.5, dim, just = c("right", "top"))
+        txt(as.character(r$Invoices), colr[2], cur - 0.0065, 8.5, dim, just = c("right", "top"))
+        txt(if (r$Spend > 0) money(r$Spend) else "-", colr[3], cur - 0.0065, 8.5, dim, just = c("right", "top"))
+        hrule(cur - 0.0225); cur <- cur - 0.0225
+      }
+    }
+  }
+  brk(0.05); cur <- cur - 0.012
+  rct(0.07, cur, 0.86, 0.026, fill = BAND, col = BAND)
+  txt("TOTAL", colx[1], cur - 0.008, 7.5, GREEN, "bold")
+  txt(as.character(sum(st$Entries)), colr[1], cur - 0.008, 7.5, GREEN, "bold", just = c("right", "top"))
+  txt(as.character(nrow(invoices_df)), colr[2], cur - 0.008, 7.5, GREEN, "bold", just = c("right", "top"))
+  txt(money(tot_spend), colr[3], cur - 0.008, 7.5, GREEN, "bold", just = c("right", "top"))
+  cur <- cur - 0.026
+  unattr <- tot_spend - sum(st$Spend)
+  if (round(unattr, 2) != 0) txt(paste0("Includes ", money(unattr),
+      " on invoices not matched to an item - they have no plant history entry to attribute them to."),
+      0.07, cur - 0.008, 7, SLATE)
+  ftr()
+  # ---- job cards & inspections grid ----
+  gtypes <- names(SOLID)
+  ev <- history_df[history_df$EntryType %in% gtypes, , drop = FALSE]
+  if (nrow(ev) > 0) ev$DateOnly <- as.Date(substr(ev$DateTime, 1, 10))
+  ev <- ev[!is.na(ev$DateOnly), , drop = FALSE]
+  by_week <- as.numeric(end - start) <= 100
+  if (by_week) {
+    cols <- seq(floor_to_monday(start), floor_to_monday(end), by = "1 week")
+    ev$Bucket <- if (nrow(ev)) floor_to_monday(ev$DateOnly) else as.Date(character(0))
+    clab <- format(cols, "%d %b")
+  } else {
+    cols <- seq(as.Date(format(start, "%Y-%m-01")), as.Date(format(end, "%Y-%m-01")), by = "1 month")
+    ev$Bucket <- if (nrow(ev)) as.Date(format(ev$DateOnly, "%Y-%m-01")) else as.Date(character(0))
+    clab <- format(cols, "%b %y")
+  }
+  active <- st[st$Entries > 0, , drop = FALSE]
+  hdr("Job Cards & Inspections")
+  txt("Job Cards & Inspections", 0.07, 0.895, 17, INK)
+  txt(paste0("Coverage across the period", if (by_week) ", by week." else ", by month.",
+             " Only plant with something logged - the other ", nrow(st) - nrow(active),
+             " item(s) appear on the Fleet Summary."), 0.07, 0.862, 8.5, SLATE)
+  lx <- 0.07
+  for (nm in gtypes) {
+    rct(lx, 0.836, 0.015, 0.0106, fill = TINT[[nm]], col = SOLID[[nm]], lwd = 0.8)
+    ctr(LET[[nm]], lx + 0.0075, 0.8307, 6, DARK[[nm]])
+    txt(paste0(LET[[nm]], "  ", nm), lx + 0.021, 0.8345, 6.8, SLATE)
+    lx <- lx + 0.021 + nchar(nm) * 0.0091 + 0.026
+  }
+  txt("+  More than one", lx, 0.8345, 6.8, SLATE)
+  nc <- length(cols)
+  lab_w <- 0.30; gx0 <- 0.07 + lab_w; gw <- 0.93 - gx0
+  colw <- gw / nc; sq <- min(0.027, colw * 0.72); sqh <- sq * 0.7075
+  ghead <- function(y) {
+    for (i in seq_len(nc)) ctr(clab[i], gx0 + (i - 0.5) * colw, y, if (nc > 8) 5.6 else 6.5, SLATE)
+    hrule(y - 0.009); y - 0.015
+  }
+  cur <- ghead(0.806); lastcat <- ""
+  gbrk <- function(need) { if (cur - need < BOTTOM) { ftr(); hdr("Job Cards & Inspections"); cur <<- ghead(0.885); lastcat <<- "" } }
+  if (nrow(active) == 0) {
+    txt("Nothing logged against any plant in this period.", 0.07, cur - 0.010, 9, SLATE)
+  } else {
+    for (ct in cats) {
+      rows_c <- natural_sort_labels(active[active$Category == ct, , drop = FALSE])
+      if (!nrow(rows_c)) next
+      gbrk(0.07)
+      if (!identical(lastcat, ct)) {
+        rct(0.07, cur, 0.86, 0.020, fill = CATEGORY_COLOUR(ct), col = NA)
+        txt(toupper(ct), 0.082, cur - 0.006, 7, "#FFFFFF", "bold"); cur <- cur - 0.020; lastcat <- ct
+      }
+      for (i in seq_len(nrow(rows_c))) {
+        r <- rows_c[i, ]; gbrk(0.030)
+        txt(r$Item, 0.084, cur - 0.007, 8.5, INK, "bold")
+        for (k in seq_len(nc)) {
+          tys <- unique(ev$EntryType[ev$ItemID == r$ItemID & ev$Bucket == cols[k]])
+          tys <- intersect(gtypes, tys)
+          x <- gx0 + (k - 0.5) * colw - sq / 2; yy <- cur - (0.026 - sqh) / 2
+          if (!length(tys)) rct(x, yy, sq, sqh, fill = EMPTY_T, col = EMPTY_L, lwd = 0.5)
+          else if (length(tys) > 1) { rct(x, yy, sq, sqh, fill = MULTI_T, col = MULTI, lwd = 0.9)
+            ctr("+", x + sq / 2, yy - sqh / 2, 7.5, MULTI_D) }
+          else { rct(x, yy, sq, sqh, fill = TINT[[tys]], col = SOLID[[tys]], lwd = 0.9)
+            ctr(LET[[tys]], x + sq / 2, yy - sqh / 2, 7, DARK[[tys]]) }
+        }
+        hrule(cur - 0.026, 0.07, 0.93, "#ECEAE4"); cur <- cur - 0.026
+      }
+    }
+    txt("Pale grey = nothing logged in that column.", 0.07, cur - 0.012, 7, SLATE)
+  }
+  ftr()
+  # ---- analysis ----
+  barh <- function(top, title, d, valcol, col, fmt) {
+    d <- d[d[[valcol]] > 0, , drop = FALSE]
+    txt(title, 0.07, top, 10.5, INK, "bold"); hrule(top - 0.017)
+    if (!nrow(d)) { txt("Nothing recorded in this period.", 0.07, top - 0.030, 8, SLATE); return(top - 0.050) }
+    d <- head(d[order(-d[[valcol]], -d$Spend, d$Item), , drop = FALSE], 8)
+    y <- top - 0.030; mx <- max(d[[valcol]])
+    for (i in seq_len(nrow(d))) {
+      lab <- if (d$Machine[i] == "-") d$Item[i] else paste0(d$Item[i], " - ", d$Machine[i])
+      txt(substr(lab, 1, 42), 0.07, y - 0.003, 8.2, INK)
+      bw <- 0.36 * d[[valcol]][i] / mx
+      rct(0.40, y - 0.001, bw, 0.0135, fill = col, col = NA)
+      txt(fmt(d[[valcol]][i]), 0.40 + bw + 0.009, y - 0.003, 7.5, SLATE)
+      y <- y - 0.0235
+    }
+    y
+  }
+  hdr("Analysis")
+  txt("Analysis", 0.07, 0.895, 17, INK)
+  txt("Where the period's money and workload went. Ranked across the whole fleet, top 8 each.", 0.07, 0.862, 8.5, SLATE)
+  y <- barh(0.820, "Highest cost", st, "Spend", "#9C2B2B", money)
+  y <- barh(y - 0.030, "Most frequent invoices", st, "Invoices", "#3A6EA5", as.character)
+  y <- barh(y - 0.030, "Most frequent job cards", st, "JobCards", "#D9A400", as.character)
+  txt("Ties are broken by total spend, then by plant number.", 0.07, y - 0.010, 7, SLATE)
+  ftr()
+  # ---- detail ----
+  if (include_detail && nrow(active) > 0) {
+    hdr("Plant Detail")
+    txt("Plant Detail", 0.07, 0.895, 17, INK)
+    txt("Only plant with something logged. Every entry in full, oldest first.", 0.07, 0.862, 8.5, SLATE)
+    cur <- 0.828
+    L1 <- th("A"); LH <- th("A\nA") - L1
+    dbrk <- function(need) { if (cur - need < BOTTOM) { ftr(); hdr("Plant Detail"); cur <<- 0.885 } }
+    for (ct in cats) {
+      rows_c <- natural_sort_labels(active[active$Category == ct, , drop = FALSE])
+      for (i in seq_len(nrow(rows_c))) {
+        r <- rows_c[i, ]
+        hh <- history_df[history_df$ItemID == r$ItemID, , drop = FALSE]
+        hh <- hh[order(hh$DateTime), , drop = FALSE]
+        dbrk(0.16)
+        rct(0.07, cur, 0.86, 0.044, fill = GREEN, col = GREEN)
+        txt(r$Item, 0.084, cur - 0.010, 12, "#FFFFFF", "bold")
+        txt(r$Machine, 0.20, cur - 0.012, 9.5, "#D7E3DC")
+        txt(paste0(nrow(hh), " entries"), 0.915, cur - 0.012, 8, GOLD, "bold", just = c("right", "top"))
+        cur <- cur - 0.044
+        rct(0.07, cur, 0.86, 0.026, fill = "#F8F7F3", col = LINE)
+        txt(paste0(r$Category, " > ", r$SubCategory, "    |    ", r$Invoices, " invoice(s)",
+                   if (r$Spend > 0) paste0("    |    ", money(r$Spend)) else ""),
+            0.084, cur - 0.008, 7.5, SLATE)
+        cur <- cur - 0.026 - 0.008
+        for (k in seq_len(nrow(hh))) {
+          e <- hh[k, ]
+          lines <- wrap_lines(if (is.na(e$Description)) "-" else e$Description, 104)
+          if (!length(lines)) lines <- "-"
+          bh <- L1 + max(length(lines) - 1, 0) * LH + 0.014
+          dbrk(min(0.020 + bh + 0.010, 0.32))
+          rct(0.07, cur, 0.86, 0.020, fill = BAND, col = NA)
+          txt(paste0(toupper(e$EntryType), "   -   ", substr(e$DateTime, 1, 10)), 0.084, cur - 0.006, 7, GREEN, "bold")
+          txt(paste("By:", e$RecordedBy), 0.915, cur - 0.006, 6.5, SLATE, just = c("right", "top"))
+          cur <- cur - 0.020
+          rct(0.07, cur, 0.86, bh, fill = NA, col = LINE)
+          txt(paste(lines, collapse = "\n"), 0.084, cur - 0.010, 8.2)
+          cur <- cur - bh - 0.010
+        }
+        cur <- cur - 0.014
+      }
+    }
+    ftr()
+  }
+  invisible(NULL)
 }
 # ---------------------------------------------------------------
 # PRINTABLE JOB CARD
@@ -1295,6 +1641,22 @@ server <- function(input, output, session) {
         br(),
         h6("Invoice Highlights", style = "text-align:center;"),
         div(class = "chart-card", tableOutput("home_invoice_highlights"))
+      ),
+      if (r %in% c("Admin", "Boss")) tagList(
+        br(),
+        div(class = "chart-card",
+            h6("Download a report"),
+            p(class = "text-muted mb-2",
+              "A full PDF for any period: every item of plant with its entry, invoice and spend counts; a Job Cards & Inspections grid; what cost the most and needed the most work; and every entry in full."),
+            fluidRow(
+              column(3, selectInput("hr_scope", "Period type",
+                                    choices = c("Month", "Quarter", "Half year", "Year"), selected = "Month")),
+              column(5, uiOutput("hr_period_ui")),
+              column(4, div(style = "margin-top:24px;",
+                            downloadButton("hr_download", "Download Report (PDF)", class = "btn-warning w-100")))
+            ),
+            checkboxInput("hr_detail", "Include every entry in full - untick for a shorter summary-only report", value = TRUE)
+        )
       ),
       br(),
       fluidRow(
@@ -2241,6 +2603,41 @@ server <- function(input, output, session) {
     removeModal()
     showNotification("Entry removed.", type = "message")
   })
+  # ---- Period reports (Home page) ----
+  # The second dropdown is rebuilt from the first, so picking "Quarter"
+  # offers quarters rather than months.
+  output$hr_period_ui <- renderUI({
+    scope <- if (!is.null(input$hr_scope)) input$hr_scope else "Month"
+    ch <- report_period_choices(scope)
+    selectInput("hr_period", scope, choices = ch, selected = unname(ch)[1])
+  })
+  hr_slice <- reactive({
+    req(input$hr_scope, input$hr_period)
+    b <- report_period_bounds(input$hr_scope, input$hr_period)
+    h <- plant_history()
+    if (nrow(h) > 0) {
+      h$DateOnly <- as.Date(substr(h$DateTime, 1, 10))
+      h <- h[!is.na(h$DateOnly) & h$DateOnly >= b$start & h$DateOnly <= b$end, , drop = FALSE]
+    }
+    iv <- invoices_data()
+    if (nrow(iv) > 0) {
+      d <- suppressWarnings(as.Date(iv$Date))
+      iv <- iv[!is.na(d) & d >= b$start & d <= b$end, , drop = FALSE]
+    }
+    list(bounds = b, history = h, invoices = iv)
+  })
+  output$hr_download <- downloadHandler(
+    filename = function() {
+      req(input$hr_period)
+      paste0("pmk_report_", gsub("[^A-Za-z0-9]+", "_", input$hr_period), ".pdf")
+    },
+    content = function(file) {
+      s <- hr_slice()
+      generate_period_report_pdf(file, s$bounds$label, s$bounds$start, s$bounds$end,
+                                 inventory_data(), s$history, s$invoices,
+                                 include_detail = isTRUE(input$hr_detail))
+    }
+  )
   # ---- Print a single Job Card ----
   # Read-only throughout: nothing here writes to plant_history() or
   # inventory_data(), it only reads the entry and renders a PDF.
@@ -3454,11 +3851,6 @@ server <- function(input, output, session) {
       draw_report_page(page_title, subtitle, df[idx, , drop = FALSE], col_widths, wrap_cols, wrap_chars)
     }
   }
-  # Category display order for the report's grouped sections - not
-  # the same as CATEGORY_OPTIONS (which is alphabetical-ish for the
-  # picker dropdowns); this is the order requested for reports
-  # specifically, with anything unrecognised tacked on the end.
-  REPORT_CATEGORY_ORDER <- c("Excavator", "Trailer", "Breaker", "Misc", "Vehicle")
   # Renders one page of a grouped table: a normal column header row,
   # then a mix of full-width category/sub-category band rows and
   # normal data rows, all sized via the same "null" unit row-height
