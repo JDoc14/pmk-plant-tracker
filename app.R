@@ -676,6 +676,37 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
   do.call(accordion, c(list(id = base_id, open = FALSE), cat_panels))
 }
 # ---------------------------------------------------------------
+# LOGO FOR PDFs
+# grid.raster() needs pixels, and R can't read the .webp the web app
+# serves without a package Connect Cloud doesn't have - the same trap
+# gridExtra was. So the logo is pre-decoded into a plain numeric array
+# and stored as an .rds: readRDS() and grid.raster() are both base R, so
+# this adds no dependency at all. www/pmk_logo.webp is still what the
+# browser uses; the .rds exists only for the PDFs.
+#
+# Regenerating it (only needed if the logo itself changes) is just
+# reading the image into an array with dim c(height, width, 4), values
+# in 0-1, and saveRDS(compress = "xz").
+# ---------------------------------------------------------------
+PMK_LOGO <- local({
+  f <- "www/pmk_logo.rds"
+  if (!file.exists(f)) return(NULL)
+  tryCatch(readRDS(f), error = function(e) {
+    message("Logo not loaded, PDFs will render without it: ", conditionMessage(e))
+    NULL
+  })
+})
+# Sized in inches so it stays square whatever the page proportions are,
+# and silently does nothing if the logo file is missing - a PDF without
+# a logo beats a PDF that fails to generate.
+draw_pmk_logo <- function(x, y, size_in = 0.62, just = c("left", "centre")) {
+  if (is.null(PMK_LOGO)) return(invisible(NULL))
+  grid.raster(PMK_LOGO, x = unit(x, "npc"), y = unit(y, "npc"),
+              width = unit(size_in, "inches"), height = unit(size_in, "inches"),
+              just = just, interpolate = TRUE)
+  invisible(NULL)
+}
+# ---------------------------------------------------------------
 # PERIOD REPORTS - month / quarter / half year / year
 # One PDF covering a whole period: a fleet summary with every item and
 # its counts, a Job Cards & Inspections grid, ranked analysis, and
@@ -1064,8 +1095,9 @@ generate_jobcard_pdf <- function(file, entry, item) {
     grid.rect(gp = gpar(fill = "#FFFFFF", col = NA))
     rct(0, 1, 1, 0.085, fill = GREEN, col = NA)
     rct(0, 0.915, 1, 0.006, fill = GOLD, col = NA)
-    txt("PMK CIVIL ENGINEERING LTD", 0.07, 0.972, 13, "#FFFFFF", "bold")
-    txt("Process 4 - Plant and Equipment", 0.07, 0.945, 8, "#D7E3DC")
+    draw_pmk_logo(0.07, 0.9575)
+    txt("PMK CIVIL ENGINEERING LTD", 0.155, 0.972, 13, "#FFFFFF", "bold")
+    txt("Process 4 - Plant and Equipment", 0.155, 0.945, 8, "#D7E3DC")
     txt(if (cont) "JOB CARD (CONT.)" else "JOB CARD", 0.93, 0.972, 15, GOLD, "bold", just = c("right", "top"))
     txt(paste("Ref", nz(entry$EntryID)), 0.93, 0.946, 8, "#D7E3DC", just = c("right", "top"))
   }
