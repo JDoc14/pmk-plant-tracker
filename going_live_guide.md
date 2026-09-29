@@ -50,7 +50,16 @@ Posit Connect Cloud is the product shinyapps.io is being folded into - this is t
 
 1. Gmail App Password: turn on 2-Step Verification on the sending Gmail account, then generate an app password at myaccount.google.com/apppasswords.
 2. Locally, one-time: `library(blastula); create_smtp_creds_file(file = "email_creds", user = "your-address@gmail.com", provider = "gmail")` - paste the app password when prompted. This is only needed for local testing; it's gitignored.
-3. Set `EMAIL_FROM` and `REPORT_RECIPIENTS` in `send_reports.R`.
+3. Set the sender and recipients as environment variables rather than editing the script - real addresses must not go into the public repo:
+   - `PMK_EMAIL_FROM` - the sending address
+   - `PMK_REPORT_RECIPIENTS` - who gets the reports, comma-separated
+
+   For a crontab, put them above the schedule lines:
+   ```
+   PMK_EMAIL_FROM=reports@yourdomain.co.uk
+   PMK_REPORT_RECIPIENTS=someone@example.com,someone.else@example.com
+   ```
+   The script stops with a clear message if either is missing, rather than quietly sending to nobody.
 4. Test locally: `Rscript send_reports.R daily` (or weekly/monthly) and confirm the email arrives.
 
 ### Scheduling it

@@ -73,8 +73,29 @@ library(blastula)
 SHEETS_SERVICE_ACCOUNT_JSON <- "sheets_service_account.json"
 SHEETS_SPREADSHEET_ID <- "1ige-Yigs_Qp8aWRBxPy9fR3_sJjhe5fZO3ZrUbCQmZQ"
 EMAIL_CREDS_FILE <- "email_creds"
-EMAIL_FROM <- "your-sending-address@gmail.com"
-REPORT_RECIPIENTS <- c("jack.doc13@outlook.com")  # add more addresses as needed
+# Sender and recipients come from the environment, same reasoning as the
+# service account key and the logins: this file lives in a public repo,
+# and a real address sitting in it is free material for scrapers - and
+# phishing whoever receives these reports is a direct route to
+# everything else.
+#   PMK_EMAIL_FROM          the sending address
+#   PMK_REPORT_RECIPIENTS   who gets the reports, comma-separated
+# Set them in the crontab/shell that runs this, or in Connect Cloud's
+# environment variables if it's ever published there. Example crontab
+# line with them set is at the top of this file.
+EMAIL_FROM <- trimws(Sys.getenv("PMK_EMAIL_FROM", unset = ""))
+REPORT_RECIPIENTS <- {
+  raw <- Sys.getenv("PMK_REPORT_RECIPIENTS", unset = "")
+  if (nzchar(raw)) trimws(strsplit(raw, ",")[[1]]) else character(0)
+}
+REPORT_RECIPIENTS <- REPORT_RECIPIENTS[nzchar(REPORT_RECIPIENTS)]
+# Fail loudly rather than sending to nobody, or from a placeholder.
+if (!nzchar(EMAIL_FROM)) {
+  stop("PMK_EMAIL_FROM is not set - it needs the address these reports are sent from.")
+}
+if (length(REPORT_RECIPIENTS) == 0) {
+  stop("PMK_REPORT_RECIPIENTS is not set - it needs a comma-separated list of addresses to send to.")
+}
 
 key_json_env <- Sys.getenv("GOOGLE_SHEETS_KEY_JSON", unset = "")
 if (nzchar(key_json_env)) {

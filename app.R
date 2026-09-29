@@ -242,9 +242,12 @@ load_initial_data <- function(seed_df, tab_name, sheet_cols) {
 #      someone is purely a variable change in Connect Cloud: add one to
 #      create a login, delete one to switch that login off. No code
 #      change and no republish needed for either.
-#      Current logins: sean (Admin), jack (Admin), kevin (Boss),
-#      evan (Plantman), mags (Manager), chris (Mechanic). The
-#      "Boss" and "Manager" roles have the same access as Admin across
+#      The live list of who has a login is deliberately NOT written
+#      down here - this file is in a public repo, and a roll-call of
+#      usernames and their access levels is exactly what someone
+#      probing the login form would want. Connect Cloud's environment
+#      variables are the list.
+#      The "Boss" and "Manager" roles have the same access as Admin across
 #      the app, except that Manager cannot see the Notifications tab or
 #      Admin > Staff Activity - the two per-person activity logs.
 #      The "Plantman" role can access and edit Inventory
