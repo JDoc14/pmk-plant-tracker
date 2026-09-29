@@ -679,6 +679,51 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
   do.call(accordion, c(list(id = base_id, open = FALSE), cat_panels))
 }
 # ---------------------------------------------------------------
+# INK-SAVER PRINTING
+# Every PDF the app produces draws through a handful of helpers, so one
+# colour transform here turns the lot black and white.
+#
+# It is NOT a plain greyscale conversion. Desaturating would leave the
+# full-width header band and the table headers as heavy dark grey, which
+# uses as much toner as the colour did. Instead FILLS are lightened and
+# LINES AND TEXT are darkened, so a solid green band becomes a pale grey
+# one with black type on it - far less ink, and it still reads as a
+# deliberate design rather than a colour document printed badly.
+#
+# White text sitting on a dark fill is the case that has to be caught:
+# left alone it would turn invisible once the fill went pale, so light
+# text is flipped to near-black.
+#
+# Set PDF_MONO to FALSE to get the colour versions back.
+# ---------------------------------------------------------------
+PDF_MONO <- TRUE
+pdf_ink <- function(x, role = "text") {
+  if (!isTRUE(PDF_MONO) || is.null(x) || length(x) != 1) return(x)
+  if (is.na(x)) return(x)
+  rgb <- tryCatch(grDevices::col2rgb(x)[, 1] / 255, error = function(e) NULL)
+  if (is.null(rgb)) return(x)
+  lum <- 0.299 * rgb[1] + 0.587 * rgb[2] + 0.114 * rgb[3]
+  if (identical(role, "fill")) {
+    # Near-white fills keep their own lightness (pure white stays pure
+    # white, so page backgrounds cost nothing) but still come out grey,
+    # so the whole sheet is genuinely black and white rather than a
+    # faint colour wash a mono printer has to guess at.
+    if (lum >= 0.90) return(grDevices::grey(lum))
+    grDevices::grey(min(0.78 + 0.18 * lum, 0.96))   # dark fills become pale greys
+  } else if (identical(role, "line")) {
+    # Rules and borders need their own rule. A hairline is a light
+    # colour, and the text rule below flips light colours to near-black
+    # to rescue white-on-dark type - applied to gridlines that would
+    # turn every table border black and spend MORE ink than the colour
+    # version. Light stays light here; only genuinely dark borders go black.
+    if (lum > 0.65) "#B0B0B0" else "#000000"
+  } else {
+    if (lum > 0.65) "#111111"                       # was light text on a dark fill
+    else if (lum > 0.33) "#555555"                  # captions stay a softer grey
+    else "#000000"
+  }
+}
+# ---------------------------------------------------------------
 # LOGO FOR PDFs
 # grid.raster() needs pixels, and R can't read the .webp the web app
 # serves without a package Connect Cloud doesn't have - the same trap
@@ -702,9 +747,17 @@ PMK_LOGO <- local({
 # Sized in inches so it stays square whatever the page proportions are,
 # and silently does nothing if the logo file is missing - a PDF without
 # a logo beats a PDF that fails to generate.
+PMK_LOGO_MONO <- local({
+  if (is.null(PMK_LOGO) || length(dim(PMK_LOGO)) != 3 || dim(PMK_LOGO)[3] < 3) return(NULL)
+  g <- 0.299 * PMK_LOGO[, , 1] + 0.587 * PMK_LOGO[, , 2] + 0.114 * PMK_LOGO[, , 3]
+  out <- PMK_LOGO
+  out[, , 1] <- g; out[, , 2] <- g; out[, , 3] <- g
+  out
+})
 draw_pmk_logo <- function(x, y, size_in = 0.62, just = c("left", "centre")) {
-  if (is.null(PMK_LOGO)) return(invisible(NULL))
-  grid.raster(PMK_LOGO, x = unit(x, "npc"), y = unit(y, "npc"),
+  art <- if (isTRUE(PDF_MONO) && !is.null(PMK_LOGO_MONO)) PMK_LOGO_MONO else PMK_LOGO
+  if (is.null(art)) return(invisible(NULL))
+  grid.raster(art, x = unit(x, "npc"), y = unit(y, "npc"),
               width = unit(size_in, "inches"), height = unit(size_in, "inches"),
               just = just, interpolate = TRUE)
   invisible(NULL)
@@ -810,14 +863,14 @@ generate_period_report_pdf <- function(file, label, start, end, inv_data, histor
   PG <- 0
   txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
     grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
-              gp = gpar(fontsize = cex, col = col, fontface = face, lineheight = 1.25))
+              gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face, lineheight = 1.25))
   ctr <- function(s, x, y, cex = 7, col = INK, face = "bold")
-    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = col, fontface = face))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face))
   rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
     grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
-              just = c("left", "top"), gp = gpar(fill = fill, col = col, lwd = lwd))
+              just = c("left", "top"), gp = gpar(fill = pdf_ink(fill, "fill"), col = pdf_ink(col, "line"), lwd = lwd))
   hrule <- function(y, x0 = 0.07, x1 = 0.93, col = LINE)
-    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = col, lwd = 0.7))
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = pdf_ink(col, "line"), lwd = 0.7))
   th <- function(s, cex = 9)
     convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
   money <- function(v) paste0("£", formatC(v, format = "f", digits = 2, big.mark = ","))
@@ -981,7 +1034,11 @@ generate_period_report_pdf <- function(file, label, start, end, inv_data, histor
       lab <- if (d$Machine[i] == "-") d$Item[i] else paste0(d$Item[i], " - ", d$Machine[i])
       txt(substr(lab, 1, 42), 0.07, y - 0.003, 8.2, INK)
       bw <- 0.36 * d[[valcol]][i] / mx
-      rct(0.40, y - 0.001, bw, 0.0135, fill = col, col = NA)
+      # A solid colour bar pales to near-white once the colour is taken
+      # out, and a bar you cannot see the end of is worse than no bar. In
+      # mono the fill is kept light and the outline carries the length.
+      if (isTRUE(PDF_MONO)) rct(0.40, y - 0.001, bw, 0.0135, fill = "#E8E8E8", col = "#4A4A4A", lwd = 0.5)
+      else rct(0.40, y - 0.001, bw, 0.0135, fill = col, col = NA)
       txt(fmt(d[[valcol]][i]), 0.40 + bw + 0.009, y - 0.003, 7.5, SLATE)
       y <- y - 0.0235
     }
@@ -1135,20 +1192,32 @@ generate_service_inspection_pdf <- function(file, entry, item) {
   PG <- 0
   txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
     grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
-              gp = gpar(fontsize = cex, col = col, fontface = face, lineheight = 1.25))
+              gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face, lineheight = 1.25))
   ctr <- function(s, x, y, cex = 7, col = INK, face = "bold")
-    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = col, fontface = face))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face))
   rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
     grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
-              just = c("left", "top"), gp = gpar(fill = fill, col = col, lwd = lwd))
+              just = c("left", "top"), gp = gpar(fill = pdf_ink(fill, "fill"), col = pdf_ink(col, "line"), lwd = lwd))
   hrule <- function(y, x0 = 0.07, x1 = 0.93, col = LINE)
-    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = col, lwd = 0.7))
-  vline <- function(x, y0, y1) grid.lines(x = unit(c(x, x), "npc"), y = unit(c(y0, y1), "npc"), gp = gpar(col = LINE, lwd = 0.4))
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = pdf_ink(col, "line"), lwd = 0.7))
+  vline <- function(x, y0, y1) grid.lines(x = unit(c(x, x), "npc"), y = unit(c(y0, y1), "npc"), gp = gpar(col = pdf_ink(LINE, "line"), lwd = 0.4))
   th <- function(s, cex = 9)
     convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
   badge <- function(x, y, w, h, code) {
     s <- ST[[code]]
-    rct(x, y, w, h, fill = s[1], col = s[2], lwd = 0.8)
+    fill <- s[1]; lwd <- 0.8
+    if (isTRUE(PDF_MONO)) {
+      # Stripped of colour, an R box and an S box come out the same pale
+      # grey, so a flagged item stops standing out on a page of 22 rows -
+      # on a safety record that is the one thing that must catch the eye.
+      # Weight does the job colour used to: R gets a heavy border and a
+      # deeper grey, N/A the lightest. These greys sit above the near-white
+      # threshold on purpose so pdf_ink() passes them through as given.
+      if (code == "R") { fill <- "#E6E6E6"; lwd <- 2.2 }
+      else if (code == "N/A") { fill <- "#FCFCFC"; lwd <- 0.6 }
+      else { fill <- "#F7F7F7"; lwd <- 0.8 }
+    }
+    rct(x, y, w, h, fill = fill, col = s[2], lwd = lwd)
     ctr(code, x + w / 2, y - h / 2, if (code == "N/A") 6 else 7.5, s[3])
   }
   hdr <- function(sub = "") {
@@ -1235,16 +1304,27 @@ generate_service_inspection_pdf <- function(file, entry, item) {
   txt("NO.", 0.082, cur - 0.007, 6.3, "#FFFFFF", "bold"); txt("FAULT DETAILS", 0.135, cur - 0.007, 6.3, "#FFFFFF", "bold")
   txt("ACTION TAKEN", 0.46, cur - 0.007, 6.3, "#FFFFFF", "bold"); txt("RECTIFIED BY", 0.76, cur - 0.007, 6.3, "#FFFFFF", "bold")
   cur <- cur - 0.022
+  # Wrap the fault columns instead of cutting them. substr() was lopping
+  # the action taken off mid-word, which on a safety record reads as if
+  # the work was never finished - the row grows to fit instead.
+  F1 <- th("A", 8); FN <- th("A\nA", 8) - F1
   nrows <- max(length(p$faults), 3)
-  for (i in seq_len(nrows)) {
+  frows <- lapply(seq_len(nrows), function(i) {
     fr <- if (i <= length(p$faults)) p$faults[[i]] else c("", "", "")
-    rct(0.07, cur, 0.86, 0.024)
-    txt(as.character(i), 0.082, cur - 0.008, 8, SLATE)
-    txt(substr(nz(fr[1], ""), 1, 46), 0.135, cur - 0.008, 8)
-    txt(substr(nz(fr[2], ""), 1, 42), 0.46, cur - 0.008, 8)
-    txt(substr(nz(fr[3], ""), 1, 22), 0.76, cur - 0.008, 8)
-    for (xx in c(0.128, 0.45, 0.75)) vline(xx, cur, cur - 0.024)
-    cur <- cur - 0.024
+    cs <- list(wrap_lines(nz(fr[1], ""), 46), wrap_lines(nz(fr[2], ""), 42), wrap_lines(nz(fr[3], ""), 22))
+    nl <- max(1, vapply(cs, length, integer(1)))
+    list(cols = cs, h = max(0.024, F1 + (nl - 1) * FN + 0.013))
+  })
+  brk(sum(vapply(frows, function(r) r$h, numeric(1))) + 0.02)
+  for (ri in seq_along(frows)) {
+    r <- frows[[ri]]
+    rct(0.07, cur, 0.86, r$h)
+    txt(as.character(ri), 0.082, cur - 0.008, 8, SLATE)
+    txt(paste(r$cols[[1]], collapse = "\n"), 0.135, cur - 0.008, 8)
+    txt(paste(r$cols[[2]], collapse = "\n"), 0.46, cur - 0.008, 8)
+    txt(paste(r$cols[[3]], collapse = "\n"), 0.76, cur - 0.008, 8)
+    for (xx in c(0.128, 0.45, 0.75)) vline(xx, cur, cur - r$h)
+    cur <- cur - r$h
   }
   # ---- general defects ----
   gd <- nz(f[["Defects Found (general)"]], ""); gr <- nz(f[["Rectified By (general)"]], "")
@@ -1264,12 +1344,25 @@ generate_service_inspection_pdf <- function(file, entry, item) {
   press <- trimws(strsplit(nz(f[["Tyres - Pressures"]], ""), ",")[[1]])
   getv <- function(v, i) if (length(v) >= i && nzchar(v[i])) v[i] else ""
   txt("Tread Depth", 0.07, cur, 7, SLATE, "bold"); txt("Pressures", 0.52, cur, 7, SLATE, "bold"); cur <- cur - 0.015
+  # A tyre value the app did not split on commas (someone typed one free
+  # text line) used to be centred at full size in the first box and ran
+  # clean off the edge of the page. Shrink to fit, and only clip once the
+  # text is too small to read anyway.
+  fitc <- function(s, xc, y, w) {
+    if (!nzchar(s)) return(invisible(NULL))
+    cex <- 8
+    while (cex > 5 && convertWidth(grobWidth(textGrob(s, gp = gpar(fontsize = cex))), "npc", valueOnly = TRUE) > w - 0.006)
+      cex <- cex - 0.5
+    while (nchar(s) > 4 && convertWidth(grobWidth(textGrob(s, gp = gpar(fontsize = cex))), "npc", valueOnly = TRUE) > w - 0.006)
+      s <- substr(s, 1, nchar(s) - 1)
+    ctr(s, xc, y, cex, INK, "plain")
+  }
   for (r in 1:2) {
     for (c in 1:3) {
       rct(0.07 + (c - 1) * 0.09, cur, 0.085, 0.020)
-      ctr(getv(tread, (r - 1) * 3 + c), 0.07 + (c - 1) * 0.09 + 0.0425, cur - 0.010, 8, INK, "plain")
+      fitc(getv(tread, (r - 1) * 3 + c), 0.07 + (c - 1) * 0.09 + 0.0425, cur - 0.010, 0.085)
       rct(0.52 + (c - 1) * 0.09, cur, 0.085, 0.020)
-      ctr(getv(press, (r - 1) * 3 + c), 0.52 + (c - 1) * 0.09 + 0.0425, cur - 0.010, 8, INK, "plain")
+      fitc(getv(press, (r - 1) * 3 + c), 0.52 + (c - 1) * 0.09 + 0.0425, cur - 0.010, 0.085)
     }
     cur <- cur - 0.022
   }
@@ -1349,12 +1442,12 @@ generate_jobcard_pdf <- function(file, entry, item) {
   on.exit(dev.off(), add = TRUE)
   txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
     grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
-              gp = gpar(fontsize = cex, col = col, fontface = face, lineheight = 1.25))
+              gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face, lineheight = 1.25))
   rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
     grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
-              just = c("left", "top"), gp = gpar(fill = fill, col = col, lwd = lwd))
+              just = c("left", "top"), gp = gpar(fill = pdf_ink(fill, "fill"), col = pdf_ink(col, "line"), lwd = lwd))
   hrule <- function(y, x0 = 0.07, x1 = 0.93)
-    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = LINE, lwd = 0.7))
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = pdf_ink(LINE, "line"), lwd = 0.7))
   fld <- function(x, y, w, h, label, value, vcex = 9.5) {
     rct(x, y, w, h)
     txt(toupper(label), x + 0.012, y - 0.008, 6.2, SLATE, "bold")
