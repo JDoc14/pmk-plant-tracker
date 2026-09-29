@@ -1042,6 +1042,272 @@ generate_period_report_pdf <- function(file, label, start, end, inv_data, histor
   invisible(NULL)
 }
 # ---------------------------------------------------------------
+# PRINTABLE SERVICE INSPECTION (Form 32, Issue B)
+# Reads a saved Service Inspection description back into structure.
+# build_service_desc() writes flat "Key: value" lines plus three
+# indented list blocks - items flagged for repair, items marked non
+# applicable, and the numbered fault details - so the parser tracks
+# which block it is inside as it walks the lines.
+#
+# Every one of the 22 items is printed, not just the exceptions: the
+# point of a Form 32 is evidence that each was checked. Items default to
+# S and are overridden to R or N/A from the two lists, which is exactly
+# how the entry was recorded.
+# ---------------------------------------------------------------
+SI_KEYS <- c("Machine", "Outward Inspection Date", "Inward Inspection Date",
+             "Fleet/Chassis Number", "PMK Plant Number", "Make & Type",
+             "Next Service/Inspection Due", "Defects Found (general)",
+             "Rectified By (general)", "Tyres - Tread Depth", "Tyres - Pressures",
+             "Name of Inspector", "Reviewed By", "Name of Supervisor",
+             "Location", "Price", "Additional Comments")
+parse_service_inspection <- function(desc) {
+  out <- list(fields = setNames(as.list(rep("", length(SI_KEYS))), SI_KEYS),
+              date_in = "", date_out = "", status = setNames(rep("S", length(SERVICE_CHECKLIST_FLAT)), NULL),
+              defect = rep("", length(SERVICE_CHECKLIST_FLAT)),
+              rectified = rep("", length(SERVICE_CHECKLIST_FLAT)),
+              faults = list(), confirmed = FALSE)
+  if (is.null(desc) || is.na(desc) || desc == "") return(out)
+  # "  - 5. Ground Level Items - Wheels/Tyres/Tracks | Defect: x | Rectified By: y"
+  item_no <- function(s) {
+    # match and extract from the SAME string - running regexpr() on the
+    # cleaned copy but regmatches() on the original silently returns the
+    # wrong characters, because the match positions no longer line up
+    s2 <- sub("^\\s*-\\s*", "", s)
+    m <- regmatches(s2, regexpr("^[0-9]+", s2))
+    if (length(m) == 0) NA_integer_ else as.integer(m)
+  }
+  part_after <- function(s, key) {
+    p <- strsplit(s, "|", fixed = TRUE)[[1]]
+    hit <- p[startsWith(trimws(p), paste0(key, ":"))]
+    if (!length(hit)) return("")
+    trimws(substring(trimws(hit[1]), nchar(key) + 2))
+  }
+  block <- ""; cur_key <- NA_character_
+  for (ln in strsplit(desc, "\n", fixed = TRUE)[[1]]) {
+    t <- trimws(ln)
+    if (t == "Items flagged for repair (R):") { block <- "R"; cur_key <- NA; next }
+    if (t == "Non Applicable (N/A):")         { block <- "NA"; cur_key <- NA; next }
+    if (t == "Fault Details:")                { block <- "F"; cur_key <- NA; next }
+    if (startsWith(t, "Supervisor considers")) { out$confirmed <- TRUE; block <- ""; next }
+    if (startsWith(ln, "  ") && nzchar(block)) {
+      if (block == "F") {
+        body <- trimws(sub("^\\s*[0-9]+\\.\\s*", "", ln))
+        out$faults[[length(out$faults) + 1]] <- c(trimws(strsplit(body, "|", fixed = TRUE)[[1]][1]),
+                                                  part_after(body, "Action Taken"),
+                                                  part_after(body, "Rectified By"))
+      } else {
+        n <- item_no(t)
+        if (!is.na(n) && n >= 1 && n <= length(out$status)) {
+          out$status[n] <- if (block == "R") "R" else "N/A"
+          if (block == "R") {
+            out$defect[n] <- part_after(t, "Defect")
+            out$rectified[n] <- part_after(t, "Rectified By")
+          }
+        }
+      }
+      next
+    }
+    block <- ""
+    if (startsWith(t, "Date In Workshop:")) {
+      p <- strsplit(t, "|", fixed = TRUE)[[1]]
+      out$date_in <- trimws(sub("^Date In Workshop:", "", trimws(p[1])))
+      if (length(p) > 1) out$date_out <- trimws(sub("^Date Out Workshop:", "", trimws(p[2])))
+      cur_key <- NA; next
+    }
+    hit <- NA_character_
+    for (k in SI_KEYS) if (startsWith(t, paste0(k, ":"))) { hit <- k; break }
+    if (!is.na(hit)) { cur_key <- hit; out$fields[[hit]] <- trimws(substring(t, nchar(hit) + 2)) }
+    else if (!is.na(cur_key)) out$fields[[cur_key]] <- paste0(out$fields[[cur_key]], "\n", ln)
+  }
+  out$fields <- lapply(out$fields, trimws)
+  out
+}
+generate_service_inspection_pdf <- function(file, entry, item) {
+  p <- parse_service_inspection(entry$Description)
+  f <- p$fields
+  nz <- function(x, d = "-") if (is.null(x) || length(x) == 0 || is.na(x) || trimws(x) == "") d else trimws(x)
+  GREEN <- "#0B4D3A"; GOLD <- "#C9A227"; SLATE <- "#5B6770"; INK <- "#12241C"
+  LINE <- "#C9C6BC"; BAND <- "#EDEAE1"; ZEBRA <- "#F8F7F3"; RED <- "#9C2B2B"
+  ST <- list(S = c("#D8E5DD", "#3E7C59", "#2C5B41"), R = c("#F5D9D9", "#9C2B2B", "#7A2020"),
+             "N/A" = c("#EFEFEF", "#9A9A9A", "#5B6770"))
+  pdf(file, width = 8.27, height = 11.69)
+  on.exit(dev.off(), add = TRUE)
+  PG <- 0
+  txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
+              gp = gpar(fontsize = cex, col = col, fontface = face, lineheight = 1.25))
+  ctr <- function(s, x, y, cex = 7, col = INK, face = "bold")
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = col, fontface = face))
+  rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
+    grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
+              just = c("left", "top"), gp = gpar(fill = fill, col = col, lwd = lwd))
+  hrule <- function(y, x0 = 0.07, x1 = 0.93, col = LINE)
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = col, lwd = 0.7))
+  vline <- function(x, y0, y1) grid.lines(x = unit(c(x, x), "npc"), y = unit(c(y0, y1), "npc"), gp = gpar(col = LINE, lwd = 0.4))
+  th <- function(s, cex = 9)
+    convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
+  badge <- function(x, y, w, h, code) {
+    s <- ST[[code]]
+    rct(x, y, w, h, fill = s[1], col = s[2], lwd = 0.8)
+    ctr(code, x + w / 2, y - h / 2, if (code == "N/A") 6 else 7.5, s[3])
+  }
+  hdr <- function(sub = "") {
+    grid.newpage(); grid.rect(gp = gpar(fill = "#FFFFFF", col = NA)); PG <<- PG + 1
+    rct(0, 1, 1, 0.085, fill = GREEN, col = NA); rct(0, 0.915, 1, 0.006, fill = GOLD, col = NA)
+    draw_pmk_logo(0.07, 0.9575)
+    txt("PMK CIVIL ENGINEERING LTD", 0.155, 0.972, 13, "#FFFFFF", "bold")
+    txt("Process 4 - Plant and Equipment", 0.155, 0.945, 8, "#D7E3DC")
+    txt("SERVICE INSPECTION", 0.93, 0.972, 14, GOLD, "bold", just = c("right", "top"))
+    txt(paste0("Form 32  |  Issue B", if (nzchar(sub)) paste0("  |  ", sub) else ""),
+        0.93, 0.946, 7.5, "#D7E3DC", just = c("right", "top"))
+  }
+  ftr <- function() {
+    hrule(0.048)
+    txt(paste0("Ref ", nz(entry$EntryID), "  |  Logged by ", nz(entry$RecordedBy), " on ", nz(entry$DateTime),
+               "  |  PMK Plant Tracker"), 0.07, 0.038, 7, SLATE)
+    txt(paste("Page", PG), 0.93, 0.038, 7, SLATE, just = c("right", "top"))
+  }
+  fld <- function(x, y, w, h, label, value, vcex = 9) {
+    rct(x, y, w, h)
+    txt(toupper(label), x + 0.012, y - 0.008, 6.2, SLATE, "bold")
+    txt(value, x + 0.012, y - h + 0.011, vcex, INK, just = c("left", "bottom"))
+  }
+  BOTTOM <- 0.075
+  hdr()
+  rh <- 0.046; y <- 0.885
+  fld(0.07, y, 0.29, rh, "PMK Plant Number", nz(f[["PMK Plant Number"]], nz(item_identifier(item))), 11)
+  fld(0.36, y, 0.30, rh, "Make & Type", nz(f[["Make & Type"]], nz(item$Machine)))
+  fld(0.66, y, 0.27, rh, "Fleet/Chassis Number", nz(f[["Fleet/Chassis Number"]], nz(item$SerialNumber)))
+  y <- y - rh
+  fld(0.07, y, 0.29, rh, "Outward Inspection Date", nz(f[["Outward Inspection Date"]]))
+  fld(0.36, y, 0.30, rh, "Inward Inspection Date", nz(f[["Inward Inspection Date"]]))
+  fld(0.66, y, 0.27, rh, "Next Service/Inspection Due", nz(f[["Next Service/Inspection Due"]]))
+  y <- y - rh
+  fld(0.07, y, 0.29, rh, "Date In Workshop", nz(p$date_in))
+  fld(0.36, y, 0.30, rh, "Date Out Workshop", nz(p$date_out))
+  fld(0.66, y, 0.27, rh, "Category", paste0(nz(item$Category), " > ", nz(item$SubCategory)), 8)
+  cur <- y - rh - 0.014
+  # key
+  txt("KEY", 0.07, cur, 6.5, SLATE, "bold")
+  badge(0.10, cur + 0.002, 0.022, 0.012, "S");    txt("Serviceable", 0.128, cur, 6.8, SLATE)
+  badge(0.20, cur + 0.002, 0.022, 0.012, "R");    txt("Repair", 0.228, cur, 6.8, SLATE)
+  badge(0.285, cur + 0.002, 0.028, 0.012, "N/A"); txt("Non Applicable", 0.319, cur, 6.8, SLATE)
+  cur <- cur - 0.015
+  cx <- c(0.07, 0.545, 0.625, 0.815)
+  chead <- function(yy) {
+    rct(0.07, yy, 0.86, 0.020, fill = GREEN, col = GREEN)
+    txt("CHECKLIST ITEM", 0.082, yy - 0.005, 6.1, "#FFFFFF", "bold")
+    ctr("S / R / N/A", 0.585, yy - 0.010, 6.1, "#FFFFFF")
+    txt("DEFECTS FOUND", 0.635, yy - 0.005, 6.1, "#FFFFFF", "bold")
+    txt("RECTIFIED BY", 0.825, yy - 0.005, 6.1, "#FFFFFF", "bold")
+    yy - 0.020
+  }
+  L1 <- th("A", 6.6); LN <- th("A\nA", 6.6) - L1
+  cur <- chead(cur)
+  last_sec <- ""
+  for (e in SERVICE_CHECKLIST_FLAT) {
+    if (!identical(e$section, last_sec)) {
+      if (cur - 0.05 < BOTTOM) { ftr(); hdr("continued"); cur <- chead(0.885) }
+      rct(0.07, cur, 0.86, 0.015, fill = BAND, col = NA)
+      txt(toupper(e$section), 0.082, cur - 0.004, 6.4, GREEN, "bold")
+      cur <- cur - 0.015; last_sec <- e$section
+    }
+    if (cur - 0.030 < BOTTOM) { ftr(); hdr("continued"); cur <- chead(0.885); last_sec <- "" }
+    dl <- if (nzchar(p$defect[e$n])) wrap_lines(p$defect[e$n], 30) else character(0)
+    # only a flagged row grows - a clean inspection stays compact, and a
+    # defect is never truncated to make it fit
+    rw <- max(0.0185, L1 + max(length(dl) - 1, 0) * LN + 0.009)
+    if (e$n %% 2 == 0) rct(0.07, cur, 0.86, rw, fill = ZEBRA, col = NA)
+    txt(paste0(e$n, ". ", e$item), 0.082, cur - 0.0045, 7.2, INK)
+    badge(0.570, cur - (rw - 0.011) / 2, 0.030, 0.011, p$status[e$n])
+    if (length(dl)) txt(paste(dl, collapse = "\n"), 0.635, cur - 0.0045, 6.6, INK)
+    if (nzchar(p$rectified[e$n])) txt(p$rectified[e$n], 0.825, cur - 0.0045, 6.6, INK)
+    for (k in cx) vline(k, cur, cur - rw)
+    vline(0.93, cur, cur - rw)
+    hrule(cur - rw); cur <- cur - rw
+  }
+  cur <- cur - 0.016
+  brk <- function(need) if (cur - need < BOTTOM) { ftr(); hdr("continued"); cur <<- 0.885 }
+  # ---- fault details ----
+  brk(0.20)
+  txt("FAULT DETAILS", 0.07, cur, 10, INK, "bold"); cur <- cur - 0.022
+  rct(0.07, cur, 0.86, 0.022, fill = GREEN, col = GREEN)
+  txt("NO.", 0.082, cur - 0.007, 6.3, "#FFFFFF", "bold"); txt("FAULT DETAILS", 0.135, cur - 0.007, 6.3, "#FFFFFF", "bold")
+  txt("ACTION TAKEN", 0.46, cur - 0.007, 6.3, "#FFFFFF", "bold"); txt("RECTIFIED BY", 0.76, cur - 0.007, 6.3, "#FFFFFF", "bold")
+  cur <- cur - 0.022
+  nrows <- max(length(p$faults), 3)
+  for (i in seq_len(nrows)) {
+    fr <- if (i <= length(p$faults)) p$faults[[i]] else c("", "", "")
+    rct(0.07, cur, 0.86, 0.024)
+    txt(as.character(i), 0.082, cur - 0.008, 8, SLATE)
+    txt(substr(nz(fr[1], ""), 1, 46), 0.135, cur - 0.008, 8)
+    txt(substr(nz(fr[2], ""), 1, 42), 0.46, cur - 0.008, 8)
+    txt(substr(nz(fr[3], ""), 1, 22), 0.76, cur - 0.008, 8)
+    for (xx in c(0.128, 0.45, 0.75)) vline(xx, cur, cur - 0.024)
+    cur <- cur - 0.024
+  }
+  # ---- general defects ----
+  gd <- nz(f[["Defects Found (general)"]], ""); gr <- nz(f[["Rectified By (general)"]], "")
+  if (nzchar(gd) || nzchar(gr)) {
+    cur <- cur - 0.014; brk(0.09)
+    rct(0.07, cur, 0.86, 0.020, fill = BAND, col = NA)
+    txt("DEFECTS FOUND (GENERAL)", 0.082, cur - 0.006, 7, GREEN, "bold"); cur <- cur - 0.020
+    ln <- c(wrap_lines(gd, 118), if (nzchar(gr)) paste0("Rectified by: ", gr) else character(0))
+    bh <- L1 + max(length(ln) - 1, 0) * LN + 0.014
+    rct(0.07, cur, 0.86, bh); txt(paste(ln, collapse = "\n"), 0.084, cur - 0.010, 8)
+    cur <- cur - bh
+  }
+  # ---- tyres ----
+  cur <- cur - 0.014; brk(0.11)
+  txt("TYRES", 0.07, cur, 10, INK, "bold"); cur <- cur - 0.020
+  tread <- trimws(strsplit(nz(f[["Tyres - Tread Depth"]], ""), ",")[[1]])
+  press <- trimws(strsplit(nz(f[["Tyres - Pressures"]], ""), ",")[[1]])
+  getv <- function(v, i) if (length(v) >= i && nzchar(v[i])) v[i] else ""
+  txt("Tread Depth", 0.07, cur, 7, SLATE, "bold"); txt("Pressures", 0.52, cur, 7, SLATE, "bold"); cur <- cur - 0.015
+  for (r in 1:2) {
+    for (c in 1:3) {
+      rct(0.07 + (c - 1) * 0.09, cur, 0.085, 0.020)
+      ctr(getv(tread, (r - 1) * 3 + c), 0.07 + (c - 1) * 0.09 + 0.0425, cur - 0.010, 8, INK, "plain")
+      rct(0.52 + (c - 1) * 0.09, cur, 0.085, 0.020)
+      ctr(getv(press, (r - 1) * 3 + c), 0.52 + (c - 1) * 0.09 + 0.0425, cur - 0.010, 8, INK, "plain")
+    }
+    cur <- cur - 0.022
+  }
+  # ---- sign-off ----
+  cur <- cur - 0.012; brk(0.20)
+  rct(0.07, cur, 0.86, 0.026, fill = BAND, col = BAND)
+  txt("SIGN-OFF", 0.082, cur - 0.008, 7.5, GREEN, "bold"); cur <- cur - 0.026
+  rct(0.07, cur, 0.43, 0.062); rct(0.50, cur, 0.43, 0.062)
+  txt("SIGNATURE OF INSPECTOR", 0.082, cur - 0.008, 6.2, SLATE, "bold")
+  txt("NAME OF INSPECTOR", 0.512, cur - 0.008, 6.2, SLATE, "bold")
+  txt(nz(f[["Name of Inspector"]]), 0.512, cur - 0.042, 9, INK)
+  hrule(cur - 0.050, 0.082, 0.485)
+  cur <- cur - 0.062 - 0.010
+  txt("I consider the above defects rectified satisfactory and this machine is in a safe condition to operate:", 0.07, cur, 8, INK)
+  cur <- cur - 0.018
+  rct(0.07, cur, 0.43, 0.056); rct(0.50, cur, 0.43, 0.056)
+  txt("SIGNATURE OF SUPERVISOR", 0.082, cur - 0.008, 6.2, SLATE, "bold")
+  txt("REVIEWED BY", 0.512, cur - 0.008, 6.2, SLATE, "bold")
+  txt(nz(f[["Name of Supervisor"]], ""), 0.082, cur - 0.046, 9, SLATE)
+  txt(nz(f[["Reviewed By"]], ""), 0.512, cur - 0.046, 9, INK)
+  cur <- cur - 0.056
+  if (p$confirmed) {
+    txt("Confirmed in the app by the supervisor named above.", 0.07, cur - 0.010, 7, SLATE); cur <- cur - 0.020
+  }
+  # ---- comments + the operator note ----
+  ac <- nz(f[["Additional Comments"]], "")
+  if (nzchar(ac)) {
+    cur <- cur - 0.008; brk(0.06)
+    txt(paste(wrap_lines(paste0("Additional comments: ", ac), 118), collapse = "\n"), 0.07, cur, 8, INK)
+    cur <- cur - (L1 + max(length(wrap_lines(paste0("Additional comments: ", ac), 118)) - 1, 0) * LN) - 0.010
+  }
+  cur <- cur - 0.008; brk(0.04)
+  txt("Note* It is always the responsibility of the Operator that the machine is in a safe condition before being used",
+      0.07, cur, 7.5, RED, "bold")
+  ftr()
+  invisible(NULL)
+}
+# ---------------------------------------------------------------
 # PRINTABLE JOB CARD
 # Job Card entries are stored as a flat "Key: value" description (see
 # build_jobcard_desc), so printing one means reading those fields back
@@ -1990,7 +2256,7 @@ server <- function(input, output, session) {
                 div(strong(h$EntryType), span(class = "text-muted", paste0(" - ", h$DateTime))),
                 div(
                   # Printing is read-only, so it isn't gated on the editing roles.
-                  if (h$EntryType == "Job Card" && !is.na(h$EntryID) && h$EntryID != "")
+                  if (h$EntryType %in% c("Job Card", "Service Inspection") && !is.na(h$EntryID) && h$EntryID != "")
                     tags$a(href = "#", style = "font-size:0.8rem; margin-right:10px;",
                            onclick = sprintf("Shiny.setInputValue('print_entry_click', '%s', {priority:'event'}); return false;", h$EntryID),
                            "Print"),
@@ -2709,10 +2975,12 @@ server <- function(input, output, session) {
     item <- inventory_data()[inventory_data()$ItemID == row$ItemID[1], ]
     label <- if (nrow(item) > 0) item_identifier(item[1, ]) else row$ItemID[1]
     removeModal()
+    is_si <- row$EntryType[1] == "Service Inspection"
     showModal(modalDialog(
-      title = paste0("Print Job Card - ", label),
-      p("A one-page A4 sheet: machine details, the work requested and carried out, any additional comments, and space for signatures. A long write-up runs onto a second page rather than being cut off."),
-      downloadButton("entry_pdf", "Download Job Card (PDF)", class = "btn-primary"),
+      title = paste0("Print ", row$EntryType[1], " - ", label),
+      if (is_si) p("Form 32, Issue B. All 22 checklist items with their S / R / N-A marking, any defects and who rectified them, the fault table, tyre readings and signature blocks.")
+      else p("A one-page A4 sheet: machine details, the work requested and carried out, any additional comments, and space for signatures. A long write-up runs onto a second page rather than being cut off."),
+      downloadButton("entry_pdf", paste0("Download ", row$EntryType[1], " (PDF)"), class = "btn-primary"),
       easyClose = TRUE,
       footer = modalButton("Close")
     ))
@@ -2728,11 +2996,13 @@ server <- function(input, output, session) {
   output$entry_pdf <- downloadHandler(
     filename = function() {
       p <- printing_parts()
-      paste0("pmk_job_card_", gsub("[^A-Za-z0-9]+", "_", item_identifier(p$item)), "_", p$entry$EntryID, ".pdf")
+      stub <- if (p$entry$EntryType == "Service Inspection") "service_inspection" else "job_card"
+      paste0("pmk_", stub, "_", gsub("[^A-Za-z0-9]+", "_", item_identifier(p$item)), "_", p$entry$EntryID, ".pdf")
     },
     content = function(file) {
       p <- printing_parts()
-      generate_jobcard_pdf(file, p$entry, p$item)
+      if (p$entry$EntryType == "Service Inspection") generate_service_inspection_pdf(file, p$entry, p$item)
+      else generate_jobcard_pdf(file, p$entry, p$item)
     }
   )
   # ---- Entry counts + per-item history download ----
