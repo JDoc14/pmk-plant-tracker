@@ -1296,16 +1296,19 @@ generate_service_inspection_pdf <- function(file, entry, item, mono = PDF_MONO_D
       txt(toupper(e$section), 0.082, cur - 0.004, 6.4, GREEN, "bold")
       cur <- cur - 0.015; last_sec <- e$section
     }
-    if (cur - 0.030 < BOTTOM) { ftr(); hdr("continued"); cur <- chead(0.885); last_sec <- "" }
     dl <- if (nzchar(p$defect[e$n])) wrap_lines(p$defect[e$n], 30) else character(0)
+    rl <- if (nzchar(p$rectified[e$n])) wrap_lines(p$rectified[e$n], 17) else character(0)
     # only a flagged row grows - a clean inspection stays compact, and a
-    # defect is never truncated to make it fit
-    rw <- max(0.0185, L1 + max(length(dl) - 1, 0) * LN + 0.009)
+    # defect is never truncated to make it fit. Rectified By is measured
+    # too: it used to be drawn as one unwrapped line, so a long name or a
+    # note there ran out past the edge of the table.
+    rw <- max(0.0185, L1 + max(max(length(dl), length(rl)) - 1, 0) * LN + 0.009)
+    if (cur - rw - 0.004 < BOTTOM) { ftr(); hdr("continued"); cur <- chead(0.885); last_sec <- "" }
     if (e$n %% 2 == 0) rct(0.07, cur, 0.86, rw, fill = ZEBRA, col = NA)
     txt(paste0(e$n, ". ", e$item), 0.082, cur - 0.0045, 7.2, INK)
     badge(0.570, cur - (rw - 0.011) / 2, 0.030, 0.011, p$status[e$n])
     if (length(dl)) txt(paste(dl, collapse = "\n"), 0.635, cur - 0.0045, 6.6, INK)
-    if (nzchar(p$rectified[e$n])) txt(p$rectified[e$n], 0.825, cur - 0.0045, 6.6, INK)
+    if (length(rl)) txt(paste(rl, collapse = "\n"), 0.825, cur - 0.0045, 6.6, INK)
     for (k in cx) vline(k, cur, cur - rw)
     vline(0.93, cur, cur - rw)
     hrule(cur - rw); cur <- cur - rw
@@ -1344,13 +1347,33 @@ generate_service_inspection_pdf <- function(file, entry, item, mono = PDF_MONO_D
   # ---- general defects ----
   gd <- nz(f[["Defects Found (general)"]], ""); gr <- nz(f[["Rectified By (general)"]], "")
   if (nzchar(gd) || nzchar(gr)) {
-    cur <- cur - 0.014; brk(0.09)
-    rct(0.07, cur, 0.86, 0.020, fill = BAND, col = NA)
-    txt("DEFECTS FOUND (GENERAL)", 0.082, cur - 0.006, 7, GREEN, "bold"); cur <- cur - 0.020
-    ln <- c(wrap_lines(gd, 118), if (nzchar(gr)) paste0("Rectified by: ", gr) else character(0))
-    bh <- L1 + max(length(ln) - 1, 0) * LN + 0.014
-    rct(0.07, cur, 0.86, bh); txt(paste(ln, collapse = "\n"), 0.084, cur - 0.010, 8)
-    cur <- cur - bh
+    # This box draws its text at 8pt but was measured with L1/LN, which
+    # are the 6.6pt checklist metrics - every line came out about a fifth
+    # taller than the box allowed for. On top of that "Rectified by: <x>"
+    # was counted as a single line however many line breaks x contained.
+    # Together that ran a long defects list straight out of its box and
+    # over the Tyres section below it.
+    G1 <- th("A", 8); GN <- th("A\nA", 8) - G1
+    ln <- c(wrap_lines(gd, 118),
+            if (nzchar(gr)) wrap_lines(paste0("Rectified by: ", gr), 118) else character(0))
+    cur <- cur - 0.014
+    cont <- FALSE
+    repeat {
+      # Room for the band plus at least one line, or start a fresh page.
+      if (cur - (0.020 + G1 + 0.014) < BOTTOM) { ftr(); hdr("continued"); cur <- 0.885 }
+      room <- cur - 0.020 - BOTTOM - 0.014
+      fit <- max(1, floor((room - G1) / GN) + 1)
+      take <- head(ln, fit); ln <- tail(ln, -length(take))
+      bh <- G1 + max(length(take) - 1, 0) * GN + 0.014
+      rct(0.07, cur, 0.86, 0.020, fill = BAND, col = NA)
+      txt(paste0("DEFECTS FOUND (GENERAL)", if (cont) " (CONT.)" else ""),
+          0.082, cur - 0.006, 7, GREEN, "bold")
+      cur <- cur - 0.020
+      rct(0.07, cur, 0.86, bh); txt(paste(take, collapse = "\n"), 0.084, cur - 0.010, 8)
+      cur <- cur - bh
+      if (!length(ln)) break
+      cont <- TRUE; ftr(); hdr("continued"); cur <- 0.885
+    }
   }
   # ---- tyres ----
   cur <- cur - 0.014; brk(0.11)
@@ -1405,9 +1428,23 @@ generate_service_inspection_pdf <- function(file, entry, item, mono = PDF_MONO_D
   # ---- comments + the operator note ----
   ac <- nz(f[["Additional Comments"]], "")
   if (nzchar(ac)) {
-    cur <- cur - 0.008; brk(0.06)
-    txt(paste(wrap_lines(paste0("Additional comments: ", ac), 118), collapse = "\n"), 0.07, cur, 8, INK)
-    cur <- cur - (L1 + max(length(wrap_lines(paste0("Additional comments: ", ac), 118)) - 1, 0) * LN) - 0.010
+    # 8pt text, so it needs the 8pt line height - measuring it with the
+    # 6.6pt checklist metric left the operator note sitting on top of the
+    # last line of a long comment.
+    A1 <- th("A", 8); AN <- th("A\nA", 8) - A1
+    al <- wrap_lines(paste0("Additional comments: ", ac), 118)
+    cur <- cur - 0.008
+    # Split rather than brk() once: a comment longer than a whole page
+    # would otherwise run off the bottom wherever it was moved to.
+    repeat {
+      if (cur - (A1 + 0.02) < BOTTOM) { ftr(); hdr("continued"); cur <- 0.885 }
+      fit <- max(1, floor((cur - BOTTOM - 0.02 - A1) / AN) + 1)
+      take <- head(al, fit); al <- tail(al, -length(take))
+      txt(paste(take, collapse = "\n"), 0.07, cur, 8, INK)
+      cur <- cur - (A1 + max(length(take) - 1, 0) * AN) - 0.010
+      if (!length(al)) break
+      ftr(); hdr("continued"); cur <- 0.885
+    }
   }
   cur <- cur - 0.008; brk(0.04)
   txt("Note* It is always the responsibility of the Operator that the machine is in a safe condition before being used",
