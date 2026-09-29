@@ -821,8 +821,9 @@ generate_period_report_pdf <- function(file, label, start, end, inv_data, histor
   hdr <- function(sub = "") {
     grid.newpage(); grid.rect(gp = gpar(fill = "#FFFFFF", col = NA)); PG <<- PG + 1
     rct(0, 1, 1, 0.072, fill = GREEN, col = NA); rct(0, 0.928, 1, 0.005, fill = GOLD, col = NA)
-    txt("PMK CIVIL ENGINEERING LTD", 0.07, 0.978, 12, "#FFFFFF", "bold")
-    txt("Process 4 - Plant and Equipment", 0.07, 0.955, 7.5, "#D7E3DC")
+    draw_pmk_logo(0.07, 0.964, size_in = 0.52)
+    txt("PMK CIVIL ENGINEERING LTD", 0.145, 0.978, 12, "#FFFFFF", "bold")
+    txt("Process 4 - Plant and Equipment", 0.145, 0.955, 7.5, "#D7E3DC")
     txt("PLANT REPORT", 0.93, 0.978, 13, GOLD, "bold", just = c("right", "top"))
     txt(paste0(label, if (nzchar(sub)) paste0("  -  ", sub) else ""), 0.93, 0.955, 8, "#D7E3DC", just = c("right", "top"))
   }
