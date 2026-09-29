@@ -694,11 +694,23 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
 # left alone it would turn invisible once the fill went pale, so light
 # text is flipped to near-black.
 #
-# Set PDF_MONO to FALSE to get the colour versions back.
+# Black and white is a choice made per download, not a setting baked
+# into the app - there is a tick box beside each download button. It is
+# passed down as an argument rather than read from a global, because two
+# people can be downloading at once and a global would let one person's
+# choice leak into the other's PDF.
+#
+# Any printer can of course print a colour PDF in greyscale itself. The
+# reason this exists is that it does a better job than the printer would:
+# the printer darkens the header bands to heavy grey, whereas this
+# lightens the fills and darkens the type, and it keeps the flagged (R)
+# boxes and the analysis bars readable once their colour is gone.
+#
+# PDF_MONO_DEFAULT is what the tick boxes start on.
 # ---------------------------------------------------------------
-PDF_MONO <- TRUE
-pdf_ink <- function(x, role = "text") {
-  if (!isTRUE(PDF_MONO) || is.null(x) || length(x) != 1) return(x)
+PDF_MONO_DEFAULT <- FALSE
+pdf_ink <- function(x, role = "text", mono = TRUE) {
+  if (!isTRUE(mono) || is.null(x) || length(x) != 1) return(x)
   if (is.na(x)) return(x)
   rgb <- tryCatch(grDevices::col2rgb(x)[, 1] / 255, error = function(e) NULL)
   if (is.null(rgb)) return(x)
@@ -754,8 +766,8 @@ PMK_LOGO_MONO <- local({
   out[, , 1] <- g; out[, , 2] <- g; out[, , 3] <- g
   out
 })
-draw_pmk_logo <- function(x, y, size_in = 0.62, just = c("left", "centre")) {
-  art <- if (isTRUE(PDF_MONO) && !is.null(PMK_LOGO_MONO)) PMK_LOGO_MONO else PMK_LOGO
+draw_pmk_logo <- function(x, y, size_in = 0.62, just = c("left", "centre"), mono = FALSE) {
+  art <- if (isTRUE(mono) && !is.null(PMK_LOGO_MONO)) PMK_LOGO_MONO else PMK_LOGO
   if (is.null(art)) return(invisible(NULL))
   grid.raster(art, x = unit(x, "npc"), y = unit(y, "npc"),
               width = unit(size_in, "inches"), height = unit(size_in, "inches"),
@@ -846,7 +858,9 @@ report_item_stats <- function(inv_data, history_df, invoices_df) {
              stringsAsFactors = FALSE)
 }
 generate_period_report_pdf <- function(file, label, start, end, inv_data, history_df, invoices_df,
-                                       include_detail = TRUE, generated = Sys.time()) {
+                                       include_detail = TRUE, generated = Sys.time(),
+                                       mono = PDF_MONO_DEFAULT) {
+  ink <- function(x, role = "text") pdf_ink(x, role, mono)
   GREEN <- "#0B4D3A"; GOLD <- "#C9A227"; SLATE <- "#5B6770"; INK <- "#12241C"
   LINE <- "#C9C6BC"; BAND <- "#EDEAE1"; ZEBRA <- "#F6F5F1"
   SOLID <- c("Service Inspection" = "#3E7C59", "Job Card" = "#D9A400",
@@ -863,21 +877,21 @@ generate_period_report_pdf <- function(file, label, start, end, inv_data, histor
   PG <- 0
   txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
     grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
-              gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face, lineheight = 1.25))
+              gp = gpar(fontsize = cex, col = ink(col), fontface = face, lineheight = 1.25))
   ctr <- function(s, x, y, cex = 7, col = INK, face = "bold")
-    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = ink(col), fontface = face))
   rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
     grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
-              just = c("left", "top"), gp = gpar(fill = pdf_ink(fill, "fill"), col = pdf_ink(col, "line"), lwd = lwd))
+              just = c("left", "top"), gp = gpar(fill = ink(fill, "fill"), col = ink(col, "line"), lwd = lwd))
   hrule <- function(y, x0 = 0.07, x1 = 0.93, col = LINE)
-    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = pdf_ink(col, "line"), lwd = 0.7))
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = ink(col, "line"), lwd = 0.7))
   th <- function(s, cex = 9)
     convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
   money <- function(v) paste0("£", formatC(v, format = "f", digits = 2, big.mark = ","))
   hdr <- function(sub = "") {
     grid.newpage(); grid.rect(gp = gpar(fill = "#FFFFFF", col = NA)); PG <<- PG + 1
     rct(0, 1, 1, 0.072, fill = GREEN, col = NA); rct(0, 0.928, 1, 0.005, fill = GOLD, col = NA)
-    draw_pmk_logo(0.07, 0.964, size_in = 0.52)
+    draw_pmk_logo(0.07, 0.964, size_in = 0.52, mono = mono)
     txt("PMK CIVIL ENGINEERING LTD", 0.145, 0.978, 12, "#FFFFFF", "bold")
     txt("Process 4 - Plant and Equipment", 0.145, 0.955, 7.5, "#D7E3DC")
     txt("PLANT REPORT", 0.93, 0.978, 13, GOLD, "bold", just = c("right", "top"))
@@ -1037,7 +1051,7 @@ generate_period_report_pdf <- function(file, label, start, end, inv_data, histor
       # A solid colour bar pales to near-white once the colour is taken
       # out, and a bar you cannot see the end of is worse than no bar. In
       # mono the fill is kept light and the outline carries the length.
-      if (isTRUE(PDF_MONO)) rct(0.40, y - 0.001, bw, 0.0135, fill = "#E8E8E8", col = "#4A4A4A", lwd = 0.5)
+      if (isTRUE(mono)) rct(0.40, y - 0.001, bw, 0.0135, fill = "#E8E8E8", col = "#4A4A4A", lwd = 0.5)
       else rct(0.40, y - 0.001, bw, 0.0135, fill = col, col = NA)
       txt(fmt(d[[valcol]][i]), 0.40 + bw + 0.009, y - 0.003, 7.5, SLATE)
       y <- y - 0.0235
@@ -1179,7 +1193,8 @@ parse_service_inspection <- function(desc) {
   out$fields <- lapply(out$fields, trimws)
   out
 }
-generate_service_inspection_pdf <- function(file, entry, item) {
+generate_service_inspection_pdf <- function(file, entry, item, mono = PDF_MONO_DEFAULT) {
+  ink <- function(x, role = "text") pdf_ink(x, role, mono)
   p <- parse_service_inspection(entry$Description)
   f <- p$fields
   nz <- function(x, d = "-") if (is.null(x) || length(x) == 0 || is.na(x) || trimws(x) == "") d else trimws(x)
@@ -1192,21 +1207,21 @@ generate_service_inspection_pdf <- function(file, entry, item) {
   PG <- 0
   txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
     grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
-              gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face, lineheight = 1.25))
+              gp = gpar(fontsize = cex, col = ink(col), fontface = face, lineheight = 1.25))
   ctr <- function(s, x, y, cex = 7, col = INK, face = "bold")
-    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face))
+    grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), gp = gpar(fontsize = cex, col = ink(col), fontface = face))
   rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
     grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
-              just = c("left", "top"), gp = gpar(fill = pdf_ink(fill, "fill"), col = pdf_ink(col, "line"), lwd = lwd))
+              just = c("left", "top"), gp = gpar(fill = ink(fill, "fill"), col = ink(col, "line"), lwd = lwd))
   hrule <- function(y, x0 = 0.07, x1 = 0.93, col = LINE)
-    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = pdf_ink(col, "line"), lwd = 0.7))
-  vline <- function(x, y0, y1) grid.lines(x = unit(c(x, x), "npc"), y = unit(c(y0, y1), "npc"), gp = gpar(col = pdf_ink(LINE, "line"), lwd = 0.4))
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = ink(col, "line"), lwd = 0.7))
+  vline <- function(x, y0, y1) grid.lines(x = unit(c(x, x), "npc"), y = unit(c(y0, y1), "npc"), gp = gpar(col = ink(LINE, "line"), lwd = 0.4))
   th <- function(s, cex = 9)
     convertHeight(grobHeight(textGrob(s, gp = gpar(fontsize = cex, lineheight = 1.25))), "npc", valueOnly = TRUE)
   badge <- function(x, y, w, h, code) {
     s <- ST[[code]]
     fill <- s[1]; lwd <- 0.8
-    if (isTRUE(PDF_MONO)) {
+    if (isTRUE(mono)) {
       # Stripped of colour, an R box and an S box come out the same pale
       # grey, so a flagged item stops standing out on a page of 22 rows -
       # on a safety record that is the one thing that must catch the eye.
@@ -1223,7 +1238,7 @@ generate_service_inspection_pdf <- function(file, entry, item) {
   hdr <- function(sub = "") {
     grid.newpage(); grid.rect(gp = gpar(fill = "#FFFFFF", col = NA)); PG <<- PG + 1
     rct(0, 1, 1, 0.085, fill = GREEN, col = NA); rct(0, 0.915, 1, 0.006, fill = GOLD, col = NA)
-    draw_pmk_logo(0.07, 0.9575)
+    draw_pmk_logo(0.07, 0.9575, mono = mono)
     txt("PMK CIVIL ENGINEERING LTD", 0.155, 0.972, 13, "#FFFFFF", "bold")
     txt("Process 4 - Plant and Equipment", 0.155, 0.945, 8, "#D7E3DC")
     txt("SERVICE INSPECTION", 0.93, 0.972, 14, GOLD, "bold", just = c("right", "top"))
@@ -1432,7 +1447,8 @@ parse_entry_fields <- function(desc, keys) {
 # gridExtra, same constraint as the rest of the reporting. Sections grow
 # with their content and spill onto a second page rather than being
 # truncated, so a long write-up still prints in full.
-generate_jobcard_pdf <- function(file, entry, item) {
+generate_jobcard_pdf <- function(file, entry, item, mono = PDF_MONO_DEFAULT) {
+  ink <- function(x, role = "text") pdf_ink(x, role, mono)
   f <- parse_entry_fields(entry$Description, JOBCARD_KEYS)
   nz <- function(x, d = "-") if (is.null(x) || length(x) == 0 || is.na(x) || trimws(x) == "") d else trimws(x)
   GREEN <- "#0B4D3A"; GOLD <- "#C9A227"; SLATE <- "#5B6770"; INK <- "#12241C"
@@ -1442,12 +1458,12 @@ generate_jobcard_pdf <- function(file, entry, item) {
   on.exit(dev.off(), add = TRUE)
   txt <- function(s, x, y, cex = 9, col = INK, face = "plain", just = c("left", "top"))
     grid.text(s, x = unit(x, "npc"), y = unit(y, "npc"), just = just,
-              gp = gpar(fontsize = cex, col = pdf_ink(col), fontface = face, lineheight = 1.25))
+              gp = gpar(fontsize = cex, col = ink(col), fontface = face, lineheight = 1.25))
   rct <- function(x, y, w, h, fill = NA, col = LINE, lwd = 0.7)
     grid.rect(x = unit(x, "npc"), y = unit(y, "npc"), width = unit(w, "npc"), height = unit(h, "npc"),
-              just = c("left", "top"), gp = gpar(fill = pdf_ink(fill, "fill"), col = pdf_ink(col, "line"), lwd = lwd))
+              just = c("left", "top"), gp = gpar(fill = ink(fill, "fill"), col = ink(col, "line"), lwd = lwd))
   hrule <- function(y, x0 = 0.07, x1 = 0.93)
-    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = pdf_ink(LINE, "line"), lwd = 0.7))
+    grid.lines(x = unit(c(x0, x1), "npc"), y = unit(c(y, y), "npc"), gp = gpar(col = ink(LINE, "line"), lwd = 0.7))
   fld <- function(x, y, w, h, label, value, vcex = 9.5) {
     rct(x, y, w, h)
     txt(toupper(label), x + 0.012, y - 0.008, 6.2, SLATE, "bold")
@@ -1458,7 +1474,7 @@ generate_jobcard_pdf <- function(file, entry, item) {
     grid.rect(gp = gpar(fill = "#FFFFFF", col = NA))
     rct(0, 1, 1, 0.085, fill = GREEN, col = NA)
     rct(0, 0.915, 1, 0.006, fill = GOLD, col = NA)
-    draw_pmk_logo(0.07, 0.9575)
+    draw_pmk_logo(0.07, 0.9575, mono = mono)
     txt("PMK CIVIL ENGINEERING LTD", 0.155, 0.972, 13, "#FFFFFF", "bold")
     txt("Process 4 - Plant and Equipment", 0.155, 0.945, 8, "#D7E3DC")
     txt(if (cont) "JOB CARD (CONT.)" else "JOB CARD", 0.93, 0.972, 15, GOLD, "bold", just = c("right", "top"))
@@ -2073,7 +2089,8 @@ server <- function(input, output, session) {
               column(4, div(style = "margin-top:24px;",
                             downloadButton("hr_download", "Download Report (PDF)", class = "btn-warning w-100")))
             ),
-            checkboxInput("hr_detail", "Include every entry in full - untick for a shorter summary-only report", value = TRUE)
+            checkboxInput("hr_detail", "Include every entry in full - untick for a shorter summary-only report", value = TRUE),
+            checkboxInput("hr_mono", "Print in black and white - saves about 60% of the ink, and stays readable without colour", value = PDF_MONO_DEFAULT)
         )
       ),
       br(),
@@ -2454,7 +2471,8 @@ server <- function(input, output, session) {
                        ),
                        hr(),
                        h5("Checklist"),
-                       p(class = "text-muted", "Everything defaults to serviceable (S) - untick anything needing repair (R). Use the Non Applicable list below for anything this machine doesn't have (N/A)."),
+                       p(class = "text-muted", "Everything defaults to serviceable (S) - untick anything needing repair (R). Use the Non Applicable list below for anything this machine doesn't have (N/A); those get unticked and struck through here, so a ticked box always means serviceable and nothing else."),
+                       uiOutput("sv_na_style"),
                        tagList(lapply(names(SERVICE_CHECKLIST), function(sec) {
                          tagList(
                            strong(sec),
@@ -2465,6 +2483,7 @@ server <- function(input, output, session) {
                        selectizeInput("sv_na_items", "Non Applicable (N/A) - items this machine doesn't have",
                                       choices = SERVICE_ITEM_CHOICES, multiple = TRUE,
                                       options = list(placeholder = "Leave blank unless something doesn't apply")),
+                       uiOutput("sv_checklist_tally"),
                        # Appears only for items actually marked for repair - see
                        # output$sv_defect_boxes. Keeps the form short when nothing's wrong.
                        uiOutput("sv_defect_boxes"),
@@ -2670,6 +2689,59 @@ server <- function(input, output, session) {
     if (any(!vapply(vals, is.null, logical(1)))) sv_ready(TRUE)
   })
   sv_na_ids <- reactive({ if (is.null(input$sv_na_items)) character(0) else input$sv_na_items })
+  # Putting an item on the Non Applicable list unticks it in the checklist
+  # above, and taking it back off re-ticks it. What gets SAVED was always
+  # right - N/A is read before the ticks are, so N/A wins either way - but
+  # leaving the box ticked meant the screen showed a tick against
+  # something the machine doesn't have, which reads as serviceable to
+  # whoever is filling the form in.
+  sv_na_prev <- reactiveVal(character(0))
+  observeEvent(sv_token(), { sv_na_prev(character(0)) })
+  observeEvent(sv_na_ids(), {
+    if (!isTRUE(sv_ready())) return()
+    now <- sv_na_ids(); before <- sv_na_prev()
+    sv_na_prev(now)
+    added <- setdiff(now, before); removed <- setdiff(before, now)
+    if (!length(added) && !length(removed)) return()
+    for (sec in names(SERVICE_CHECKLIST)) {
+      gid <- paste0("sv_chk_", make.names(sec))
+      cur <- input[[gid]]; if (is.null(cur)) cur <- character(0)
+      items_of <- function(ids) vapply(Filter(function(e) e$id %in% ids && e$section == sec,
+                                              SERVICE_CHECKLIST_FLAT),
+                                       function(e) e$item, character(1))
+      new <- union(setdiff(cur, items_of(added)), items_of(removed))
+      new <- SERVICE_CHECKLIST[[sec]][SERVICE_CHECKLIST[[sec]] %in% new]
+      if (!setequal(new, cur)) updateCheckboxGroupInput(session, gid, selected = new)
+    }
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  # Strike the N/A rows through where they sit, so it's obvious WHY they
+  # are unticked rather than looking like 20 more items marked for repair.
+  # Scoped per section, because "Condition/Corrosion/Nuts/Bolts" is both
+  # item 16 (Chassis) and item 17 (Brakes) - a selector on the item text
+  # alone would grey out both.
+  output$sv_na_style <- renderUI({
+    es <- Filter(function(e) e$id %in% sv_na_ids(), SERVICE_CHECKLIST_FLAT)
+    if (!length(es)) return(NULL)
+    sel <- vapply(es, function(e) paste0("#sv_chk_",
+                                         gsub(".", "\\.", make.names(e$section), fixed = TRUE),
+                                         " input[value=\"", e$item, "\"] ~ span"), character(1))
+    tags$style(HTML(paste0(
+      paste(sel, collapse = ",\n"), " { text-decoration: line-through; color: #8A8F98; }\n",
+      paste(paste0(sel, "::after"), collapse = ",\n"),
+      " { content: \"  N/A\"; text-decoration: none; color: #B8860B; font-weight: 600; }")))
+  })
+  # Running totals, so whoever is filling it in can sanity-check the three
+  # numbers against the machine in front of them before saving. Same line
+  # that goes into the saved record.
+  output$sv_checklist_tally <- renderUI({
+    if (!isTRUE(sv_ready())) return(NULL)
+    n_total <- length(SERVICE_CHECKLIST_FLAT)
+    n_na <- length(sv_na_ids()); n_r <- length(sv_flagged())
+    n_s <- n_total - n_na - n_r
+    div(class = "border rounded mb-2", style = "padding:6px 10px; background:#F8F7F3;",
+        HTML(sprintf("<strong>%d</strong> serviceable (S) &nbsp;&middot;&nbsp; <strong>%d</strong> for repair (R) &nbsp;&middot;&nbsp; <strong>%d</strong> non applicable (N/A) &nbsp;of %d",
+                     n_s, n_r, n_na, n_total)))
+  })
   # Items marked for repair: unticked AND not marked Non Applicable.
   # N/A wins, so flagging something as not-applicable doesn't also make it
   # look like a failed check.
@@ -3047,13 +3119,15 @@ server <- function(input, output, session) {
   output$hr_download <- downloadHandler(
     filename = function() {
       req(input$hr_period)
-      paste0("pmk_report_", gsub("[^A-Za-z0-9]+", "_", input$hr_period), ".pdf")
+      paste0("pmk_report_", gsub("[^A-Za-z0-9]+", "_", input$hr_period),
+             if (isTRUE(input$hr_mono)) "_bw" else "", ".pdf")
     },
     content = function(file) {
       s <- hr_slice()
       generate_period_report_pdf(file, s$bounds$label, s$bounds$start, s$bounds$end,
                                  inventory_data(), s$history, s$invoices,
-                                 include_detail = isTRUE(input$hr_detail))
+                                 include_detail = isTRUE(input$hr_detail),
+                                 mono = isTRUE(input$hr_mono))
     }
   )
   # ---- Print a single Job Card ----
@@ -3073,6 +3147,8 @@ server <- function(input, output, session) {
       title = paste0("Print ", row$EntryType[1], " - ", label),
       if (is_si) p("Form 32, Issue B. All 22 checklist items with their S / R / N-A marking, any defects and who rectified them, the fault table, tyre readings and signature blocks.")
       else p("A one-page A4 sheet: machine details, the work requested and carried out, any additional comments, and space for signatures. A long write-up runs onto a second page rather than being cut off."),
+      checkboxInput("entry_mono", "Print in black and white - saves ink, and stays readable without colour",
+                    value = PDF_MONO_DEFAULT),
       downloadButton("entry_pdf", paste0("Download ", row$EntryType[1], " (PDF)"), class = "btn-primary"),
       easyClose = TRUE,
       footer = modalButton("Close")
@@ -3090,12 +3166,14 @@ server <- function(input, output, session) {
     filename = function() {
       p <- printing_parts()
       stub <- if (p$entry$EntryType == "Service Inspection") "service_inspection" else "job_card"
-      paste0("pmk_", stub, "_", gsub("[^A-Za-z0-9]+", "_", item_identifier(p$item)), "_", p$entry$EntryID, ".pdf")
+      paste0("pmk_", stub, "_", gsub("[^A-Za-z0-9]+", "_", item_identifier(p$item)), "_", p$entry$EntryID,
+             if (isTRUE(input$entry_mono)) "_bw" else "", ".pdf")
     },
     content = function(file) {
       p <- printing_parts()
-      if (p$entry$EntryType == "Service Inspection") generate_service_inspection_pdf(file, p$entry, p$item)
-      else generate_jobcard_pdf(file, p$entry, p$item)
+      bw <- isTRUE(input$entry_mono)
+      if (p$entry$EntryType == "Service Inspection") generate_service_inspection_pdf(file, p$entry, p$item, mono = bw)
+      else generate_jobcard_pdf(file, p$entry, p$item, mono = bw)
     }
   )
   # ---- Entry counts + per-item history download ----
