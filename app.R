@@ -708,6 +708,11 @@ nested_inventory_accordion <- function(base_id, df, r, show_actions = TRUE, clic
 #
 # PDF_MONO_DEFAULT is what the tick boxes start on.
 # ---------------------------------------------------------------
+# When these two forms were issued. Document control, not the date of the
+# work - it is printed on every copy whenever the entry was logged, and
+# only changes if the form itself is reissued. Both printouts read it
+# from here so they can never drift apart.
+FORM_ISSUE_DATE <- "September 2026"
 PDF_MONO_DEFAULT <- FALSE
 pdf_ink <- function(x, role = "text", mono = TRUE) {
   if (!isTRUE(mono) || is.null(x) || length(x) != 1) return(x)
@@ -1242,7 +1247,7 @@ generate_service_inspection_pdf <- function(file, entry, item, mono = PDF_MONO_D
     txt("PMK CIVIL ENGINEERING LTD", 0.155, 0.972, 13, "#FFFFFF", "bold")
     txt("Process 4 - Plant and Equipment", 0.155, 0.945, 8, "#D7E3DC")
     txt("SERVICE INSPECTION", 0.93, 0.972, 14, GOLD, "bold", just = c("right", "top"))
-    txt(paste0("Form 32  |  Issue B", if (nzchar(sub)) paste0("  |  ", sub) else ""),
+    txt(paste0("Form 32  |  Issue B  |  ", FORM_ISSUE_DATE, if (nzchar(sub)) paste0("  |  ", sub) else ""),
         0.93, 0.946, 7.5, "#D7E3DC", just = c("right", "top"))
   }
   ftr <- function() {
@@ -1515,7 +1520,7 @@ generate_jobcard_pdf <- function(file, entry, item, mono = PDF_MONO_DEFAULT) {
     txt("PMK CIVIL ENGINEERING LTD", 0.155, 0.972, 13, "#FFFFFF", "bold")
     txt("Process 4 - Plant and Equipment", 0.155, 0.945, 8, "#D7E3DC")
     txt(if (cont) "JOB CARD (CONT.)" else "JOB CARD", 0.93, 0.972, 15, GOLD, "bold", just = c("right", "top"))
-    txt(paste("Ref", nz(entry$EntryID)), 0.93, 0.946, 8, "#D7E3DC", just = c("right", "top"))
+    txt(paste0(FORM_ISSUE_DATE, "  |  Ref ", nz(entry$EntryID)), 0.93, 0.946, 8, "#D7E3DC", just = c("right", "top"))
   }
   footer <- function() {
     hrule(0.055)
